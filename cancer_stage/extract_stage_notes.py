@@ -5,15 +5,19 @@ extracted around each match, copy-forward notes are de-duplicated per patient,
 and the resulting snippets are written to a TSV evidence table. This step runs
 before any LLM calls so the scanning layer can be audited and re-used independently.
 
+Default source: the full OncDRS raw text corpus (no pre-specified MRN list required).
+Override with --notes-csv or --note-bundle-path for pre-compiled note tables.
+
 Output (under <output-dir>):
   stage_evidence.tsv    One row per unique (patient, snippet), sorted by patient + date.
 
 Usage:
-  python cancer_stage/extract_stage_notes.py [options]
+  python cancer_stage/extract_stage_notes.py --output-dir /path/to/output
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,23 +29,26 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from shared.longitudinal_helpers import (  # noqa: E402
-    DEFAULT_DATA_PATH,
-    PROSTATE_TEXT_CSV,
     filter_note_types,
     iter_note_snippets,
-    load_notes,
     load_selected_mrns,
 )
 from shared.llm_helpers import (  # noqa: E402
+    DEFAULT_RAW_TEXT_PATHS,
     build_raw_note_row,
     discover_raw_text_files,
     extract_raw_docs,
+    load_note_bundle,
+    load_notes_csv,
+    load_raw_text_notes,
     normalize_mrn_column,
 )
 
-DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_stage_timeline"
+DEFAULT_OUTPUT_DIR = Path(
+    os.environ.get("STAGE_OUTPUT_DIR", "/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/")
+)
 
-# Four trigger categories, passed as a dict to find_matches / iter_note_snippets.
+# Four trigger categories passed as a dict to find_matches / iter_note_snippets.
 # False positives are acceptable — the LLM disambiguates true staging from
 # incidental mentions. trigger_categories is recorded per snippet so the model
 # knows which evidence type triggered the scan.
@@ -65,9 +72,7 @@ STAGE_TRIGGER_REGEX = {
         r"|\b[cpyr]{0,2}[Tt][0-4][a-z]?\s*[Nn][0-3xX]\b"
         r"|\b[Mm]1[a-z]?\b"
     ),
-    "limited_extensive": (
-        r"\b(?:limited|extensive)\s+stage\b"
-    ),
+    "limited_extensive": r"\b(?:limited|extensive)\s+stage\b",
 }
 
 EVIDENCE_COLUMNS = [
@@ -81,11 +86,10 @@ EVIDENCE_COLUMNS = [
 
 
 def _load_all_raw_notes(raw_text_paths):
-    """Scan all raw OncDRS JSON files without requiring an MRN filter.
+    """Scan all raw OncDRS JSON files without an MRN filter.
 
-    load_notes() / load_raw_text_notes() rejects a None selected_mrns argument
-    because those helpers are designed for cohort-scoped pipelines. The stage
-    scan is cancer-agnostic and must be able to sweep the full corpus.
+    load_raw_text_notes() rejects a None selected_mrns argument because it is
+    designed for cohort-scoped pipelines. The stage scan sweeps the full corpus.
     """
     raw_files = discover_raw_text_files(raw_text_paths)
     if not raw_files:
@@ -102,29 +106,49 @@ def _load_all_raw_notes(raw_text_paths):
     return normalize_mrn_column(pd.DataFrame(rows))
 
 
+def _load_notes(args, selected_mrns):
+    """Load notes according to the provided arguments.
+
+    Precedence: explicit bundle > explicit CSV > raw text paths (default: full corpus).
+    Unlike the shared load_notes() helper, this function does not fall back to any
+    prostate-specific dataset and supports MRN-agnostic full-corpus scans.
+    """
+    if args.note_bundle_path is not None:
+        return load_note_bundle(args.note_bundle_path, selected_mrns)
+
+    if args.notes_csv is not None:
+        return load_notes_csv(args.notes_csv, selected_mrns)
+
+    raw_paths = args.raw_text_path or list(DEFAULT_RAW_TEXT_PATHS)
+    if selected_mrns is not None:
+        return load_raw_text_notes(raw_paths, selected_mrns)
+    return _load_all_raw_notes(raw_paths)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Scan clinical notes for stage mentions and write a snippet evidence table."
+        description="Scan clinical notes for stage mentions and write a snippet evidence table. "
+                    "By default scans the full OncDRS raw text corpus without an MRN filter."
     )
     parser.add_argument("--mrn-file", type=Path, default=None,
                         help="Optional: restrict scan to these MRNs "
-                             "(file of MRNs or CSV with DFCI_MRN column). "
-                             "Default: scan all patients.")
+                             "(file with one MRN per line, or CSV with DFCI_MRN column).")
     parser.add_argument("--mrns", default=None,
-                        help="Optional: comma- or space-separated MRNs to restrict the scan. "
-                             "Default: scan all patients.")
-    parser.add_argument("--notes-csv", type=Path, default=PROSTATE_TEXT_CSV,
-                        help="Pre-compiled prostate notes CSV (default source).")
+                        help="Optional: comma- or space-separated MRNs to restrict the scan.")
+    parser.add_argument("--notes-csv", type=Path, default=None,
+                        help="Optional: load notes from a pre-compiled CSV instead of raw files.")
     parser.add_argument("--note-bundle-path", type=Path, default=None,
-                        help="Note bundle (.json.gz) produced by write_note_bundle().")
+                        help="Optional: load notes from a .json.gz bundle "
+                             "(produced by write_note_bundle()).")
     parser.add_argument("--raw-text-path", type=Path, action="append", default=None,
-                        help="Raw OncDRS JSON directory. Repeat to add multiple paths.")
+                        help="Optional: raw OncDRS JSON directory. Repeat to add multiple. "
+                             f"Default: {[str(p) for p in DEFAULT_RAW_TEXT_PATHS]}")
     parser.add_argument("--note-types", nargs="+", default=None,
-                        help="Restrict to these NOTE_TYPE values (e.g. Pathology Clinician). "
-                             "Default: all note types.")
+                        help="Optional: restrict to these NOTE_TYPE values "
+                             "(e.g. Pathology Clinician). Default: all note types.")
     parser.add_argument("--context-chars", type=int, default=2000,
-                        help="Characters of context kept on each side of a trigger match. "
-                             "Default: 2000.")
+                        help="Characters of context kept on each side of a trigger match "
+                             "(default: 2000).")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--overwrite", action="store_true",
                         help="Delete existing stage_evidence.tsv before writing.")
@@ -139,18 +163,7 @@ def run(args):
         evidence_path.unlink()
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
-
-    # load_raw_text_notes() requires an MRN filter, so when raw text paths are
-    # specified without one we use _load_all_raw_notes() to sweep the full corpus.
-    if args.raw_text_path is not None and selected_mrns is None:
-        notes_df = _load_all_raw_notes(args.raw_text_path)
-    else:
-        notes_df = load_notes(
-            csv_path=args.notes_csv,
-            bundle_path=args.note_bundle_path,
-            raw_text_paths=args.raw_text_path,
-            selected_mrns=selected_mrns,
-        )
+    notes_df = _load_notes(args, selected_mrns)
     print(
         f"Loaded notes: {len(notes_df)} rows for "
         f"{notes_df['DFCI_MRN'].nunique()} patients"

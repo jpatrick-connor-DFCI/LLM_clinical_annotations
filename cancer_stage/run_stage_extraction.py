@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -34,7 +35,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from shared.longitudinal_helpers import (  # noqa: E402
     CLINICAL_SAFETY_CONTEXT,
-    DEFAULT_DATA_PATH,
     DEFAULT_MODEL_NAME,
     DEFAULT_PAYLOAD_MAX_CHARS,
     build_client,
@@ -47,7 +47,9 @@ from shared.longitudinal_helpers import (  # noqa: E402
 
 from cancer_stage.prompts import STAGE_SYSTEM_PROMPT  # noqa: E402
 
-DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_stage_timeline"
+DEFAULT_OUTPUT_DIR = Path(
+    os.environ.get("STAGE_OUTPUT_DIR", "/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/")
+)
 
 RAW_COLUMNS = [
     "DFCI_MRN",

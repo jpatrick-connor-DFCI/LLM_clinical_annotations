@@ -13,10 +13,12 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -29,6 +31,12 @@ from shared.longitudinal_helpers import (  # noqa: E402
     iter_note_snippets,
     load_notes,
     load_selected_mrns,
+)
+from shared.llm_helpers import (  # noqa: E402
+    build_raw_note_row,
+    discover_raw_text_files,
+    extract_raw_docs,
+    normalize_mrn_column,
 )
 
 DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_stage_timeline"
@@ -72,14 +80,39 @@ EVIDENCE_COLUMNS = [
 ]
 
 
+def _load_all_raw_notes(raw_text_paths):
+    """Scan all raw OncDRS JSON files without requiring an MRN filter.
+
+    load_notes() / load_raw_text_notes() rejects a None selected_mrns argument
+    because those helpers are designed for cohort-scoped pipelines. The stage
+    scan is cancer-agnostic and must be able to sweep the full corpus.
+    """
+    raw_files = discover_raw_text_files(raw_text_paths)
+    if not raw_files:
+        joined = ", ".join(str(p) for p in raw_text_paths)
+        raise FileNotFoundError(f"No supported raw JSON files found under: {joined}")
+    rows = []
+    for file_path, note_type in tqdm(raw_files, desc="Scanning raw files", unit="file"):
+        with open(file_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        for note in extract_raw_docs(payload):
+            row = build_raw_note_row(note, note_type, file_path)
+            if row is not None:
+                rows.append(row)
+    return normalize_mrn_column(pd.DataFrame(rows))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Scan clinical notes for stage mentions and write a snippet evidence table."
     )
     parser.add_argument("--mrn-file", type=Path, default=None,
-                        help="File of MRNs to process (one per line, or CSV with DFCI_MRN column).")
+                        help="Optional: restrict scan to these MRNs "
+                             "(file of MRNs or CSV with DFCI_MRN column). "
+                             "Default: scan all patients.")
     parser.add_argument("--mrns", default=None,
-                        help="Comma- or space-separated MRNs to process.")
+                        help="Optional: comma- or space-separated MRNs to restrict the scan. "
+                             "Default: scan all patients.")
     parser.add_argument("--notes-csv", type=Path, default=PROSTATE_TEXT_CSV,
                         help="Pre-compiled prostate notes CSV (default source).")
     parser.add_argument("--note-bundle-path", type=Path, default=None,
@@ -106,12 +139,18 @@ def run(args):
         evidence_path.unlink()
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
-    notes_df = load_notes(
-        csv_path=args.notes_csv,
-        bundle_path=args.note_bundle_path,
-        raw_text_paths=args.raw_text_path,
-        selected_mrns=selected_mrns,
-    )
+
+    # load_raw_text_notes() requires an MRN filter, so when raw text paths are
+    # specified without one we use _load_all_raw_notes() to sweep the full corpus.
+    if args.raw_text_path is not None and selected_mrns is None:
+        notes_df = _load_all_raw_notes(args.raw_text_path)
+    else:
+        notes_df = load_notes(
+            csv_path=args.notes_csv,
+            bundle_path=args.note_bundle_path,
+            raw_text_paths=args.raw_text_path,
+            selected_mrns=selected_mrns,
+        )
     print(
         f"Loaded notes: {len(notes_df)} rows for "
         f"{notes_df['DFCI_MRN'].nunique()} patients"

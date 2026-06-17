@@ -6,19 +6,29 @@ and the resulting snippets are written to a TSV evidence table. This step runs
 before any LLM calls so the scanning layer can be audited and re-used independently.
 
 Default source: the full OncDRS raw text corpus (no pre-specified MRN list required).
-Override with --notes-csv or --note-bundle-path for pre-compiled note tables.
+Raw file scanning is parallelised over files using ProcessPoolExecutor.
 
-Output (under <output-dir>):
-  stage_evidence.tsv    One row per unique (patient, snippet), sorted by patient + date.
+Incremental output (raw file path only):
+  Snippets are written to stage_evidence_raw.tsv as each file completes. Processed
+  files are logged to stage_scanned_files.tsv. Re-running without --overwrite resumes
+  from where the scan left off. stage_evidence.tsv is always rebuilt from the raw TSV
+  at the end via a dedup pass.
+
+Outputs (under <output-dir>):
+  stage_evidence.tsv         Deduped snippets — one row per unique (patient, snippet).
+  stage_evidence_raw.tsv     Pre-dedup snippets, written incrementally (parallel path).
+  stage_scanned_files.tsv    Per-file scan log used for resumability (parallel path).
 
 Usage:
   python cancer_stage/extract_stage_notes.py --output-dir /path/to/output
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -29,29 +39,33 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from shared.longitudinal_helpers import (  # noqa: E402
-    filter_note_types,
+    find_matches,
     iter_note_snippets,
     load_selected_mrns,
 )
 from shared.llm_helpers import (  # noqa: E402
     DEFAULT_RAW_TEXT_PATHS,
     build_raw_note_row,
+    build_snippet,
+    clean_note,
     discover_raw_text_files,
     extract_raw_docs,
     load_note_bundle,
     load_notes_csv,
     load_raw_text_notes,
-    normalize_mrn_column,
+    to_iso_date,
 )
 
 DEFAULT_OUTPUT_DIR = Path(
     os.environ.get("STAGE_OUTPUT_DIR", "/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/")
 )
 
-# Four trigger categories passed as a dict to find_matches / iter_note_snippets.
-# False positives are acceptable — the LLM disambiguates true staging from
-# incidental mentions. trigger_categories is recorded per snippet so the model
-# knows which evidence type triggered the scan.
+_ONCDRS_ROOT = Path("/data/gusev/PROFILE/CLINICAL/OncDRS/")
+DEFAULT_STAGE_RAW_TEXT_PATHS = (
+    *DEFAULT_RAW_TEXT_PATHS,
+    _ONCDRS_ROOT / "CLINICAL_TEXTS_2026_03",
+)
+
 STAGE_TRIGGER_REGEX = {
     "stage_group": (
         # "clinical stage IV", "pathologic stage IIIA", "Stage 2b", "stage four"
@@ -61,10 +75,7 @@ STAGE_TRIGGER_REGEX = {
         r"(?:IV[ABCabc]?|III[ABCabc]?|II[ABCabc]?|I[ABCabc]?|[0-4][ABCabc]?)\b"
         r"|\bstage\s+(?:one|two|three|four)\b"
     ),
-    "staging_system": (
-        # Any AJCC/FIGO/Ann Arbor mention implies a staging discussion.
-        r"\b(?:AJCC|FIGO|Ann\s+Arbor)\b"
-    ),
+    "staging_system": r"\b(?:AJCC|FIGO|Ann\s+Arbor)\b",
     "tnm": (
         # Require TxNx or full TxNxMx to avoid bare "T2" imaging descriptors.
         # M1 alone (metastatic classification) is included as a standalone trigger.
@@ -75,55 +86,219 @@ STAGE_TRIGGER_REGEX = {
     "limited_extensive": r"\b(?:limited|extensive)\s+stage\b",
 }
 
-EVIDENCE_COLUMNS = [
-    "note_uid",
-    "DFCI_MRN",
-    "note_date",
-    "note_type",
-    "trigger_categories",
-    "snippet",
-]
+EVIDENCE_COLUMNS = ["note_uid", "DFCI_MRN", "note_date", "note_type", "trigger_categories", "snippet"]
+SCANNED_COLUMNS = ["file_path", "note_type", "n_snippets", "status"]
 
 
-def _load_all_raw_notes(raw_text_paths):
-    """Scan all raw OncDRS JSON files without an MRN filter.
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
-    load_raw_text_notes() rejects a None selected_mrns argument because it is
-    designed for cohort-scoped pipelines. The stage scan sweeps the full corpus.
+def _n_workers(cap=8):
+    """Cores allocated to this job (SLURM-aware), capped for memory safety.
+
+    os.cpu_count() reports all physical cores and ignores SLURM cgroup limits,
+    which causes oversubscription on shared nodes. sched_getaffinity reads the
+    actual CPU allocation.
+    """
+    try:
+        allocated = len(os.sched_getaffinity(0))
+    except AttributeError:
+        allocated = os.cpu_count() or 1
+    return max(1, min(cap, allocated))
+
+
+def _note_uid(mrn, note_date, snippet, raw_note_id):
+    if raw_note_id is not None:
+        return str(raw_note_id)
+    key = f"{int(mrn)}|{note_date or ''}|{snippet[:200]}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _append_rows(path, rows, columns):
+    """Append rows to a TSV, writing the header only on the first write."""
+    if not rows:
+        return
+    pd.DataFrame(rows, columns=columns).to_csv(
+        path,
+        mode="a",
+        sep="\t",
+        index=False,
+        header=not path.exists() or path.stat().st_size == 0,
+    )
+
+
+def _records_to_tsv_rows(records):
+    """Convert snippet dicts (trigger_categories as list) to TSV-ready dicts."""
+    return [
+        {
+            "note_uid": r["note_uid"],
+            "DFCI_MRN": r["DFCI_MRN"],
+            "note_date": r["note_date"],
+            "note_type": r["note_type"],
+            "trigger_categories": ",".join(r["trigger_categories"]),
+            "snippet": r["snippet"],
+        }
+        for r in records
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Per-file worker (must be module-level for ProcessPoolExecutor pickling)
+# ---------------------------------------------------------------------------
+
+def _scan_file(args):
+    """Load one JSON file, find stage matches, return snippet records.
+
+    STAGE_TRIGGER_REGEX is resolved at import time in each worker process.
+    """
+    file_path, note_type, context_chars = args
+    rows = []
+    with open(file_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    for note in extract_raw_docs(payload):
+        row = build_raw_note_row(note, note_type, file_path)
+        if row is None:
+            continue
+        mrn = row["DFCI_MRN"]
+        cleaned = clean_note(row["CLINICAL_TEXT"], note_type=note_type)
+        if not cleaned:
+            continue
+        matches = find_matches(cleaned, STAGE_TRIGGER_REGEX)
+        if not matches:
+            continue
+        snippet = build_snippet(cleaned, matches, context_chars=context_chars)
+        if not snippet:
+            continue
+        note_date = to_iso_date(row.get("EVENT_DATE"))
+        rows.append({
+            "note_uid": _note_uid(mrn, note_date, snippet, row.get("RAW_NOTE_ID")),
+            "DFCI_MRN": int(mrn),
+            "note_date": note_date,
+            "note_type": note_type,
+            "trigger_categories": sorted({m[0] for m in matches}),
+            "snippet": snippet,
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Parallel raw-file scan with incremental output
+# ---------------------------------------------------------------------------
+
+def _parallel_scan_incremental(raw_text_paths, context_chars, max_workers, raw_path, scanned_path):
+    """Scan raw JSON files in parallel, writing results incrementally.
+
+    Already-scanned files (present in scanned_path with status "ok") are skipped,
+    so a re-run without --overwrite resumes from where the previous scan stopped.
+    Results are appended to raw_path as each future completes.
     """
     raw_files = discover_raw_text_files(raw_text_paths)
     if not raw_files:
         joined = ", ".join(str(p) for p in raw_text_paths)
         raise FileNotFoundError(f"No supported raw JSON files found under: {joined}")
-    rows = []
-    for file_path, note_type in tqdm(raw_files, desc="Scanning raw files", unit="file"):
-        with open(file_path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        for note in extract_raw_docs(payload):
-            row = build_raw_note_row(note, note_type, file_path)
-            if row is not None:
-                rows.append(row)
-    return normalize_mrn_column(pd.DataFrame(rows))
+
+    done = set()
+    if scanned_path.exists() and scanned_path.stat().st_size > 0:
+        scanned_df = pd.read_csv(scanned_path, sep="\t", dtype=str)
+        done = set(scanned_df.loc[scanned_df["status"] == "ok", "file_path"])
+
+    todo = [(fp, nt) for fp, nt in raw_files if str(fp) not in done]
+    print(
+        f"Files: {len(raw_files)} total, {len(done)} already scanned, "
+        f"{len(todo)} remaining"
+    )
+    if not todo:
+        return
+
+    args_list = [(fp, nt, context_chars) for fp, nt in todo]
+    total_snippets = 0
+    errors = 0
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_scan_file, a): a for a in args_list}
+        bar = tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc=f"Scanning files ({max_workers} workers)",
+            unit="file",
+        )
+        for future in bar:
+            file_path, note_type, _ = futures[future]
+            try:
+                records = future.result()
+                _append_rows(raw_path, _records_to_tsv_rows(records), EVIDENCE_COLUMNS)
+                _append_rows(
+                    scanned_path,
+                    [{"file_path": str(file_path), "note_type": note_type,
+                      "n_snippets": len(records), "status": "ok"}],
+                    SCANNED_COLUMNS,
+                )
+                total_snippets += len(records)
+            except Exception as exc:
+                errors += 1
+                _append_rows(
+                    scanned_path,
+                    [{"file_path": str(file_path), "note_type": note_type,
+                      "n_snippets": 0, "status": f"error: {exc!r}"}],
+                    SCANNED_COLUMNS,
+                )
+                print(f"\nWarning: skipped {file_path}: {exc!r}", file=sys.stderr)
+            bar.set_postfix(snippets=total_snippets, errors=errors, refresh=False)
+
+    if errors:
+        print(f"Scan complete with {errors} file error(s). Check stderr for details.")
 
 
-def _load_notes(args, selected_mrns):
-    """Load notes according to the provided arguments.
+def _build_evidence_from_raw(raw_path, evidence_path, note_types=None):
+    """Dedup stage_evidence_raw.tsv into stage_evidence.tsv.
 
-    Precedence: explicit bundle > explicit CSV > raw text paths (default: full corpus).
-    Unlike the shared load_notes() helper, this function does not fall back to any
-    prostate-specific dataset and supports MRN-agnostic full-corpus scans.
+    Applies optional note-type filter, then deduplicates on (DFCI_MRN, snippet)
+    keeping the earliest note_date for each unique pair.
     """
+    if not raw_path.exists() or raw_path.stat().st_size == 0:
+        pd.DataFrame(columns=EVIDENCE_COLUMNS).to_csv(evidence_path, sep="\t", index=False)
+        return 0
+
+    raw_df = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="warn")
+
+    if note_types:
+        wanted = {t.strip().lower() for t in note_types}
+        raw_df = raw_df[raw_df["note_type"].str.lower().isin(wanted)]
+        print(f"After note-type filter {list(note_types)}: {len(raw_df)} raw snippets")
+
+    # Sort so keep="first" in drop_duplicates retains the earliest note_date.
+    raw_df["_date_sort"] = pd.to_datetime(raw_df["note_date"], errors="coerce")
+    raw_df = raw_df.sort_values("_date_sort", na_position="last").drop(columns=["_date_sort"])
+
+    deduped = raw_df.drop_duplicates(subset=["DFCI_MRN", "snippet"], keep="first")
+    deduped = deduped.sort_values(["DFCI_MRN", "note_date"], na_position="last")
+    deduped.to_csv(evidence_path, sep="\t", index=False)
+    return len(deduped)
+
+
+# ---------------------------------------------------------------------------
+# Sequential path (CSV / bundle / MRN-filtered raw text)
+# ---------------------------------------------------------------------------
+
+def _load_and_scan_sequential(args, selected_mrns, context_chars):
+    """Load notes from a non-default source and scan sequentially."""
     if args.note_bundle_path is not None:
-        return load_note_bundle(args.note_bundle_path, selected_mrns)
+        notes_df = load_note_bundle(args.note_bundle_path, selected_mrns)
+        print(f"Loaded bundle: {len(notes_df)} rows for {notes_df['DFCI_MRN'].nunique()} patients")
+    elif args.notes_csv is not None:
+        notes_df = load_notes_csv(args.notes_csv, selected_mrns)
+        print(f"Loaded CSV: {len(notes_df)} rows for {notes_df['DFCI_MRN'].nunique()} patients")
+    else:
+        raw_paths = args.raw_text_path or list(DEFAULT_STAGE_RAW_TEXT_PATHS)
+        notes_df = load_raw_text_notes(raw_paths, selected_mrns)
+        print(f"Loaded {len(notes_df)} rows for {notes_df['DFCI_MRN'].nunique()} patients")
+    return list(iter_note_snippets(notes_df, STAGE_TRIGGER_REGEX, context_chars=context_chars))
 
-    if args.notes_csv is not None:
-        return load_notes_csv(args.notes_csv, selected_mrns)
 
-    raw_paths = args.raw_text_path or list(DEFAULT_RAW_TEXT_PATHS)
-    if selected_mrns is not None:
-        return load_raw_text_notes(raw_paths, selected_mrns)
-    return _load_all_raw_notes(raw_paths)
-
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -138,66 +313,69 @@ def parse_args():
     parser.add_argument("--notes-csv", type=Path, default=None,
                         help="Optional: load notes from a pre-compiled CSV instead of raw files.")
     parser.add_argument("--note-bundle-path", type=Path, default=None,
-                        help="Optional: load notes from a .json.gz bundle "
-                             "(produced by write_note_bundle()).")
+                        help="Optional: load notes from a .json.gz bundle.")
     parser.add_argument("--raw-text-path", type=Path, action="append", default=None,
                         help="Optional: raw OncDRS JSON directory. Repeat to add multiple. "
-                             f"Default: {[str(p) for p in DEFAULT_RAW_TEXT_PATHS]}")
+                             f"Default: {[str(p) for p in DEFAULT_STAGE_RAW_TEXT_PATHS]}")
     parser.add_argument("--note-types", nargs="+", default=None,
                         help="Optional: restrict to these NOTE_TYPE values "
                              "(e.g. Pathology Clinician). Default: all note types.")
     parser.add_argument("--context-chars", type=int, default=2000,
-                        help="Characters of context kept on each side of a trigger match "
-                             "(default: 2000).")
+                        help="Characters of context on each side of a trigger match (default: 2000).")
+    parser.add_argument("--max-workers", type=int, default=None,
+                        help="Parallel workers for raw file scanning. "
+                             "Default: SLURM-allocated cores, capped at 8.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--overwrite", action="store_true",
-                        help="Delete existing stage_evidence.tsv before writing.")
+                        help="Clear all existing output files and rescan from scratch.")
     return parser.parse_args()
 
 
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = args.output_dir / "stage_evidence.tsv"
-
-    if args.overwrite and evidence_path.exists():
-        evidence_path.unlink()
+    raw_path = args.output_dir / "stage_evidence_raw.tsv"
+    scanned_path = args.output_dir / "stage_scanned_files.tsv"
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
-    notes_df = _load_notes(args, selected_mrns)
-    print(
-        f"Loaded notes: {len(notes_df)} rows for "
-        f"{notes_df['DFCI_MRN'].nunique()} patients"
+    max_workers = args.max_workers or _n_workers()
+
+    # Parallel incremental path: full corpus scan, no pre-specified source or MRN list.
+    is_parallel_path = (
+        args.note_bundle_path is None
+        and args.notes_csv is None
+        and selected_mrns is None
     )
 
-    if args.note_types:
-        notes_df = filter_note_types(notes_df, args.note_types)
-        print(f"After note-type filter {args.note_types}: {len(notes_df)} rows")
+    if args.overwrite:
+        evidence_path.unlink(missing_ok=True)
+        if is_parallel_path:
+            raw_path.unlink(missing_ok=True)
+            scanned_path.unlink(missing_ok=True)
 
-    rows = []
-    for rec in iter_note_snippets(
-        notes_df, STAGE_TRIGGER_REGEX, context_chars=args.context_chars
-    ):
-        rows.append({
-            "note_uid": rec["note_uid"],
-            "DFCI_MRN": rec["DFCI_MRN"],
-            "note_date": rec["note_date"],
-            "note_type": rec["note_type"],
-            "trigger_categories": ",".join(rec["trigger_categories"]),
-            "snippet": rec["snippet"],
-        })
-
-    evidence_df = pd.DataFrame(rows, columns=EVIDENCE_COLUMNS)
-    if not evidence_df.empty:
-        evidence_df = evidence_df.sort_values(
-            ["DFCI_MRN", "note_date"], na_position="last"
+    if is_parallel_path:
+        raw_paths = args.raw_text_path or list(DEFAULT_STAGE_RAW_TEXT_PATHS)
+        _parallel_scan_incremental(
+            raw_paths, args.context_chars, max_workers, raw_path, scanned_path
         )
-    evidence_df.to_csv(evidence_path, sep="\t", index=False)
+        n = _build_evidence_from_raw(raw_path, evidence_path, args.note_types)
+    else:
+        records = _load_and_scan_sequential(args, selected_mrns, args.context_chars)
+        if args.note_types:
+            wanted = {t.strip().lower() for t in args.note_types}
+            before = len(records)
+            records = [r for r in records if (r["note_type"] or "").lower() in wanted]
+            print(f"After note-type filter {args.note_types}: {len(records)}/{before} snippets")
+        evidence_df = pd.DataFrame(_records_to_tsv_rows(records), columns=EVIDENCE_COLUMNS)
+        if not evidence_df.empty:
+            evidence_df = evidence_df.sort_values(["DFCI_MRN", "note_date"], na_position="last")
+        evidence_df.to_csv(evidence_path, sep="\t", index=False)
+        n = len(evidence_df)
 
-    n_patients = evidence_df["DFCI_MRN"].nunique() if not evidence_df.empty else 0
-    print(
-        f"Wrote {len(evidence_df)} evidence snippets for "
-        f"{n_patients} patients: {evidence_path}"
-    )
+    n_patients = 0
+    if evidence_path.exists() and evidence_path.stat().st_size > 0:
+        n_patients = pd.read_csv(evidence_path, sep="\t", usecols=["DFCI_MRN"])["DFCI_MRN"].nunique()
+    print(f"Wrote {n} evidence snippets for {n_patients} patients: {evidence_path}")
 
 
 def main():

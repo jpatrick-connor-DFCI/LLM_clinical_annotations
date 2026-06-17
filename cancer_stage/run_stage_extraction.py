@@ -209,6 +209,18 @@ def append_rows(path, rows, columns):
     )
 
 
+def _str(val):
+    """Return val as a stripped string, treating None and NaN as empty string."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(val).strip()
+
+
 def build_timeline(raw_path, timeline_path):
     """Deduplicate raw findings into the stage timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
@@ -225,9 +237,9 @@ def build_timeline(raw_path, timeline_path):
         mrn = int(mrn_val)
 
         # Normalize dedup key fields so formatting differences don't create duplicates.
-        cancer_type_raw = (getattr(r, "cancer_type", None) or "").strip()
-        stage_group_raw = (getattr(r, "stage_group", None) or "").strip()
-        tnm_raw = (getattr(r, "tnm", None) or "").strip()
+        cancer_type_raw = _str(getattr(r, "cancer_type", None))
+        stage_group_raw = _str(getattr(r, "stage_group", None))
+        tnm_raw = _str(getattr(r, "tnm", None))
 
         stage_date, date_source = resolve_date(
             getattr(r, "stage_date", None), getattr(r, "source_note_date", None)

@@ -11,8 +11,8 @@ Extract EVERY distinct staging event documented across all snippets. For each ev
 report:
 
 - cancer_type: the cancer being staged (e.g. "prostate cancer", "NSCLC"). Required.
-- stage_group: stage group as written (e.g. "IV", "IIIA", "2b"; null if not stated).
-- tnm: TNM classification string (e.g. "pT3bN1M1"; null if not stated).
+- stage_group: stage group as written (e.g. "IV", "IIIA", "2b", "limited", "extensive";
+  null if not stated).
 - stage_date: the date the staging was performed or assigned, AS STATED in the text
   (YYYY-MM-DD; use the first of month/year for partial dates; null if not stated).
 - source_note_date: the `note_date` of the snippet where you found this event.
@@ -27,10 +27,10 @@ report:
 ## RULES
 - Extract only staging explicitly documented. Do not infer stage from treatment
   response, disease descriptors ("metastatic", "localized"), or clinical trajectory.
-- When `trigger_categories` contains only "tnm" (no explicit stage word), verify the
-  TNM string represents actual staging rather than incidental text (e.g.
-  "T2-weighted MRI" or anatomical references). Return nothing for that note if no
-  real staging is present.
+- Use `trigger_categories` as a hint about why the snippet was selected, not as
+  a guarantee that staging is present. A snippet triggered only by "staging_system"
+  (e.g. "AJCC") may not contain an explicit stage value — return nothing for it if
+  no stage group is actually stated.
 - If the same staging event appears in multiple snippets, report it ONCE using the
   EARLIEST source_note_date.
 - For is_historical_reference: a 2023 note saying "initially staged as IV at diagnosis
@@ -47,7 +47,6 @@ Return ONLY valid JSON. No markdown, no explanation outside the JSON object.
     {
       "cancer_type": "prostate cancer",
       "stage_group": "IV",
-      "tnm": "cT3N1M1",
       "stage_date": "2021-04-15",
       "source_note_date": "2021-04-15",
       "is_historical_reference": false,

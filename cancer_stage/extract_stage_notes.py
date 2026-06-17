@@ -76,13 +76,6 @@ STAGE_TRIGGER_REGEX = {
         r"|\bstage\s+(?:one|two|three|four)\b"
     ),
     "staging_system": r"\b(?:AJCC|FIGO|Ann\s+Arbor)\b",
-    "tnm": (
-        # Require TxNx or full TxNxMx to avoid bare "T2" imaging descriptors.
-        # M1 alone (metastatic classification) is included as a standalone trigger.
-        r"\b[cpyr]{0,2}[Tt][0-4][a-z]?\s*[Nn][0-3xX]\s*[Mm][01][a-z]?\b"
-        r"|\b[cpyr]{0,2}[Tt][0-4][a-z]?\s*[Nn][0-3xX]\b"
-        r"|\b[Mm]1[a-z]?\b"
-    ),
     "limited_extensive": r"\b(?:limited|extensive)\s+stage\b",
 }
 
@@ -320,8 +313,8 @@ def parse_args():
     parser.add_argument("--note-types", nargs="+", default=None,
                         help="Optional: restrict to these NOTE_TYPE values "
                              "(e.g. Pathology Clinician). Default: all note types.")
-    parser.add_argument("--context-chars", type=int, default=2000,
-                        help="Characters of context on each side of a trigger match (default: 2000).")
+    parser.add_argument("--context-chars", type=int, default=600,
+                        help="Characters of context on each side of a trigger match (default: 600).")
     parser.add_argument("--max-workers", type=int, default=None,
                         help="Parallel workers for raw file scanning. "
                              "Default: SLURM-allocated cores, capped at 8.")

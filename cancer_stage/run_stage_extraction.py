@@ -22,6 +22,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -56,7 +57,6 @@ RAW_COLUMNS = [
     "source_note_date",
     "cancer_type",
     "stage_group",
-    "tnm",
     "stage_date",
     "is_historical_reference",
     "supporting_quote",
@@ -68,7 +68,6 @@ TIMELINE_COLUMNS = [
     "DFCI_MRN",
     "cancer_type",
     "stage_group",
-    "tnm",
     "stage_date",
     "date_source",
     "is_historical_reference",
@@ -165,6 +164,11 @@ def extract_patient(client, model, max_retries, mrn, chunks):
         ]
         response_text, error = call_with_retry(client, model, messages, max_retries)
         if error:
+            if error.startswith("content_filter"):
+                # Content filter errors are deterministic — retrying the same chunk
+                # will never succeed. Skip this chunk and preserve findings from
+                # other chunks rather than failing the whole patient permanently.
+                continue
             return None, error
         try:
             result = parse_json_response(response_text)
@@ -179,6 +183,14 @@ def extract_patient(client, model, max_retries, mrn, chunks):
     return findings, None
 
 
+def _normalize_stage_group(val):
+    """Strip leading 'Stage ' prefix and uppercase — e.g. 'Stage IV' → 'IV', 'IIIa' → 'IIIA'."""
+    if not val:
+        return None
+    cleaned = re.sub(r"(?i)^stage\s+", "", str(val).strip())
+    return cleaned.upper() or None
+
+
 def raw_rows_from_findings(mrn, findings):
     rows = []
     for finding in findings:
@@ -186,8 +198,7 @@ def raw_rows_from_findings(mrn, findings):
             "DFCI_MRN": int(mrn),
             "source_note_date": finding.get("source_note_date"),
             "cancer_type": finding.get("cancer_type"),
-            "stage_group": finding.get("stage_group"),
-            "tnm": finding.get("tnm"),
+            "stage_group": _normalize_stage_group(finding.get("stage_group")),
             "stage_date": finding.get("stage_date"),
             "is_historical_reference": finding.get("is_historical_reference"),
             "supporting_quote": flatten_ws(finding.get("supporting_quote")),
@@ -239,7 +250,6 @@ def build_timeline(raw_path, timeline_path):
         # Normalize dedup key fields so formatting differences don't create duplicates.
         cancer_type_raw = _str(getattr(r, "cancer_type", None))
         stage_group_raw = _str(getattr(r, "stage_group", None))
-        tnm_raw = _str(getattr(r, "tnm", None))
 
         stage_date, date_source = resolve_date(
             getattr(r, "stage_date", None), getattr(r, "source_note_date", None)
@@ -249,7 +259,6 @@ def build_timeline(raw_path, timeline_path):
             mrn,
             cancer_type_raw.lower() or None,
             stage_group_raw.upper() or None,
-            tnm_raw.upper() or None,
             stage_date,
         )
         if key in seen:
@@ -260,7 +269,6 @@ def build_timeline(raw_path, timeline_path):
             "DFCI_MRN": mrn,
             "cancer_type": cancer_type_raw or None,
             "stage_group": stage_group_raw or None,
-            "tnm": tnm_raw or None,
             "stage_date": stage_date,
             "date_source": date_source,
             "is_historical_reference": getattr(r, "is_historical_reference", None),
@@ -274,6 +282,19 @@ def build_timeline(raw_path, timeline_path):
         timeline = timeline.sort_values(
             ["DFCI_MRN", "cancer_type", "stage_date"], na_position="last"
         )
+        # Keep only rows where stage_group changes within each (patient, cancer_type).
+        # This collapses repeated identical staging entries over time — once a stage
+        # is established (including metastatic/IV), subsequent rows with the same
+        # stage add no new information.
+        last_stage = {}
+        keep = []
+        for idx, row in timeline.iterrows():
+            key = (row["DFCI_MRN"], (_str(row["cancer_type"])).lower())
+            curr = (_str(row["stage_group"])).upper()
+            if last_stage.get(key) != curr:
+                keep.append(idx)
+                last_stage[key] = curr
+        timeline = timeline.loc[keep]
     timeline.to_csv(timeline_path, sep="\t", index=False)
     return len(timeline)
 

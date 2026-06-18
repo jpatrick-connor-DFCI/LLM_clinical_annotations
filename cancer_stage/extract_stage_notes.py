@@ -68,15 +68,12 @@ DEFAULT_STAGE_RAW_TEXT_PATHS = (
 
 STAGE_TRIGGER_REGEX = {
     "stage_group": (
-        # "clinical stage IV", "pathologic stage IIIA", "Stage 2b", "stage four"
-        r"\b(?:clinical|pathologic|pathological)\s+stage\s+"
-        r"(?:IV[ABCabc]?|III[ABCabc]?|II[ABCabc]?|I[ABCabc]?|[0-4][ABCabc]?)\b"
-        r"|\bstage\s+"
-        r"(?:IV[ABCabc]?|III[ABCabc]?|II[ABCabc]?|I[ABCabc]?|[0-4][ABCabc]?)\b"
+        # "clinical stage IV", "pathologic stage III", "Stage II", "stage four"
+        # Only base Roman numeral stages (I/II/III/IV) — \b prevents matching IIIA, IIB, etc.
+        r"\b(?:clinical|pathologic|pathological)\s+stage\s+(?:IV|III|II|I)\b"
+        r"|\bstage\s+(?:IV|III|II|I)\b"
         r"|\bstage\s+(?:one|two|three|four)\b"
     ),
-    "staging_system": r"\b(?:AJCC|FIGO|Ann\s+Arbor)\b",
-    "limited_extensive": r"\b(?:limited|extensive)\s+stage\b",
 }
 
 EVIDENCE_COLUMNS = ["note_uid", "DFCI_MRN", "note_date", "note_type", "trigger_categories", "snippet"]

@@ -183,12 +183,17 @@ def extract_patient(client, model, max_retries, mrn, chunks):
     return findings, None
 
 
+_VALID_STAGES = {"I", "II", "III", "IV"}
+_WORD_TO_STAGE = {"ONE": "I", "TWO": "II", "THREE": "III", "FOUR": "IV"}
+
+
 def _normalize_stage_group(val):
-    """Strip leading 'Stage ' prefix and uppercase — e.g. 'Stage IV' → 'IV', 'IIIa' → 'IIIA'."""
+    """Normalize to I/II/III/IV; return None for substages, numerics, or unknown values."""
     if not val:
         return None
-    cleaned = re.sub(r"(?i)^stage\s+", "", str(val).strip())
-    return cleaned.upper() or None
+    cleaned = re.sub(r"(?i)^stage\s+", "", str(val).strip()).upper()
+    cleaned = _WORD_TO_STAGE.get(cleaned, cleaned)
+    return cleaned if cleaned in _VALID_STAGES else None
 
 
 def raw_rows_from_findings(mrn, findings):

@@ -11,8 +11,8 @@ Extract EVERY distinct staging event documented across all snippets. For each ev
 report:
 
 - cancer_type: the cancer being staged (e.g. "prostate cancer", "NSCLC"). Required.
-- stage_group: stage group as written (e.g. "IV", "IIIA", "2b", "limited", "extensive";
-  null if not stated).
+- stage_group: base stage group only — "I", "II", "III", or "IV" (null if not stated or
+  if only a substage like "IIIA", "IIB", or "limited/extensive" is present).
 - stage_date: the date the staging was performed or assigned, AS STATED in the text
   (YYYY-MM-DD; use the first of month/year for partial dates; null if not stated).
 - source_note_date: the `note_date` of the snippet where you found this event.
@@ -27,10 +27,10 @@ report:
 ## RULES
 - Extract only staging explicitly documented. Do not infer stage from treatment
   response, disease descriptors ("metastatic", "localized"), or clinical trajectory.
-- Use `trigger_categories` as a hint about why the snippet was selected, not as
-  a guarantee that staging is present. A snippet triggered only by "staging_system"
-  (e.g. "AJCC") may not contain an explicit stage value — return nothing for it if
-  no stage group is actually stated.
+- Report only base stage groups: I, II, III, or IV. If the text states a substage
+  (e.g. "IIIA", "IIB", "limited stage") but not the base stage, set stage_group to
+  the base Roman numeral (e.g. "IIIA" → "III"). If no base stage (I–IV) can be
+  determined, set stage_group to null.
 - If the same staging event appears in multiple snippets, report it ONCE using the
   EARLIEST source_note_date.
 - For is_historical_reference: a 2023 note saying "initially staged as IV at diagnosis

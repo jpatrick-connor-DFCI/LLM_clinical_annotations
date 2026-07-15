@@ -34,7 +34,7 @@ shared/
 
 1. Load notes for the requested MRNs (from a pre-compiled gzip bundle if present, otherwise raw OncDRS JSONs).
 2. Per note, scan for any of the combined NEPC + AVPC + biomarker trigger regexes and build a snippet window around the matches.
-3. Per patient, rank triggered notes by `(# trigger categories, # triggers, recency)` and keep the top N (default 25).
+3. Per patient, rank triggered notes by `(# trigger categories, # triggers, recency)` and keep the top N (default 30).
 4. Send all selected snippets to the LLM in a single call. The model returns the patient's primary label, per-category booleans, supporting quotes, and a rationale.
 5. Patients with no triggered notes are written out as `conventional` without an LLM call.
 
@@ -83,7 +83,7 @@ The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_cl
 ## Useful flags
 
 ```text
---max-notes-per-patient N    # cap selected snippets per patient (default 25)
+--max-notes-per-patient N    # cap selected snippets per patient (default 30)
 --max-workers N              # concurrent patient classifications (default 4)
 --limit-mrns N               # cap how many MRNs to process this run
 --model NAME                 # override the Azure OpenAI deployment (default gpt-4o)
@@ -92,6 +92,6 @@ The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_cl
 
 ## Notes
 
-- All triggers are matched on `clean_note`-cleaned text. Each note's snippet is capped at ~20000 chars; per-patient snippet counts are capped (default 25), so a single LLM call typically sees a larger focused context while still staying under the patient payload cap.
+- All triggers are matched on `clean_note`-cleaned text. Each note's snippet is capped at ~30000 chars; per-patient snippet counts are capped (default 30), so a single LLM call typically sees a larger focused context while still staying under the patient payload cap.
 - No structured labs, genomics tables, medication tables, or PSA tables are used in this classifier — all signal comes from note text.
 - `cisplatin` and `carboplatin` are no longer used as triggers; biomarker selection is driven by the molecular terms above.

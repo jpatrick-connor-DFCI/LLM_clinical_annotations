@@ -729,7 +729,10 @@ def call_with_retry(client, model_name, messages, max_retries=3):
             )
             if response.choices[0].finish_reason == "content_filter":
                 return None, "content_filter_response"
-            return response.choices[0].message.content.strip(), None
+            content = response.choices[0].message.content
+            if content is None:
+                return None, f"empty_response: finish_reason={response.choices[0].finish_reason}"
+            return content.strip(), None
         except RateLimitError:
             time.sleep(2 ** attempt * 5)
         except APITimeoutError:

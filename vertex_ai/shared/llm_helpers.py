@@ -13,18 +13,17 @@ except ImportError:
     ijson = None
 
 try:
-    from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-    from openai import APIError, APITimeoutError, AzureOpenAI, RateLimitError
+    import google.api_core.exceptions as gcp_exceptions
+    import vertexai
+    from vertexai.generative_models import GenerationConfig, GenerativeModel
 
-    AZURE_IMPORT_ERROR = None
+    VERTEX_IMPORT_ERROR = None
 except ImportError as error:
-    DefaultAzureCredential = None
-    get_bearer_token_provider = None
-    AzureOpenAI = None
-    APIError = Exception
-    APITimeoutError = Exception
-    RateLimitError = Exception
-    AZURE_IMPORT_ERROR = error
+    gcp_exceptions = None
+    vertexai = None
+    GenerativeModel = None
+    GenerationConfig = None
+    VERTEX_IMPORT_ERROR = error
 
 
 from shared.utils import clean_note  # noqa: E402
@@ -52,8 +51,6 @@ DEFAULT_RAW_TEXT_PATHS = (
     Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11/"),
 )
 NOTE_BUNDLE_FILENAME = "LLM_NEPC_classifier_note_bundle.json.gz"
-# Compiled prostate notes CSV (produced by data_preprocessing/compile_prostate_notes.py).
-# This is the default note source for all LLM pipelines.
 PROSTATE_TEXT_CSV = DEFAULT_DATA_PATH / "prostate_text_data.csv"
 
 NOTE_BUNDLE_COLUMNS = (
@@ -71,15 +68,10 @@ NOTE_BUNDLE_COLUMNS = (
 )
 
 
-# Azure OpenAI
-DEFAULT_AZURE_OPENAI_ENDPOINT = os.environ.get(
-    "CAIA_AZURE_OPENAI_ENDPOINT",
-    "https://je76vfkda5tn4-openai-eastus2.openai.azure.com/",
-)
-DEFAULT_AZURE_OPENAI_API_VERSION = os.environ.get(
-    "CAIA_AZURE_OPENAI_API_VERSION", "2024-04-01-preview"
-)
-DEFAULT_MODEL_NAME = os.environ.get("CAIA_AZURE_OPENAI_MODEL", "gpt-4o")
+# Vertex AI
+VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "gusevlabllm")
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
+DEFAULT_MODEL_NAME = os.environ.get("VERTEX_MODEL", "gemini-2.0-flash-001")
 
 
 # Triggers — combined NEPC + AVPC + biomarker terms
@@ -514,7 +506,6 @@ def write_note_bundle(path, note_df, *, raw_text_paths=None, selected_mrns=None)
 
 
 def write_notes_csv(path, note_df):
-    """Write standardized note rows to a CSV (the default LLM-pipeline note source)."""
     if note_df.empty:
         standardized = pd.DataFrame(columns=list(NOTE_BUNDLE_COLUMNS))
     else:
@@ -556,7 +547,6 @@ def load_note_bundle(path, selected_mrns=None):
 
 
 def load_notes_csv(csv_path, selected_mrns=None):
-    """Load the compiled prostate notes CSV produced by compile_prostate_notes.py."""
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"Prostate notes CSV not found: {csv_path}")
@@ -590,9 +580,6 @@ def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected
 # Snippet building
 SNIPPET_CONTEXT_CHARS = 6000
 SNIPPET_MAX_CHARS = 30000
-# Hard cap on total snippet chars per patient payload. 128k-token models at ~4 chars/token
-# give ~500k input chars; we budget ~300k for snippets to leave room for the system prompt,
-# JSON scaffolding, and output.
 PATIENT_PAYLOAD_MAX_CHARS = 300000
 
 
@@ -704,40 +691,44 @@ def build_patient_snippets(
     return ranked
 
 
-# LLM client
+# LLM client — Vertex AI
 def build_client():
-    if AZURE_IMPORT_ERROR is not None:
+    if VERTEX_IMPORT_ERROR is not None:
         raise ImportError(
-            "Azure note extraction requires azure-identity and openai in the active environment."
-        ) from AZURE_IMPORT_ERROR
-    token_provider = get_bearer_token_provider(
-        DefaultAzureCredential(),
-        "https://cognitiveservices.azure.com/.default",
-    )
-    return AzureOpenAI(
-        api_version=DEFAULT_AZURE_OPENAI_API_VERSION,
-        azure_endpoint=DEFAULT_AZURE_OPENAI_ENDPOINT,
-        azure_ad_token_provider=token_provider,
-    )
+            "Vertex AI note extraction requires google-cloud-aiplatform in the active environment."
+        ) from VERTEX_IMPORT_ERROR
+    vertexai.init(project=VERTEX_PROJECT, location=VERTEX_LOCATION)
+    # GenerativeModel is instantiated per call; return None as a sentinel so call sites
+    # that pass `client` as the first arg to call_with_retry still work unchanged.
+    return None
 
 
-def call_with_retry(client, model_name, messages, max_retries=3):
+def call_with_retry(client, model_name, messages, max_retries=3):  # noqa: ARG001 (client unused)
+    system_parts = [m["content"] for m in messages if m["role"] == "system"]
+    user_parts = [m["content"] for m in messages if m["role"] == "user"]
+    system_instruction = "\n\n".join(system_parts) if system_parts else None
+
+    model = GenerativeModel(model_name, system_instruction=system_instruction)
+    generation_config = GenerationConfig(temperature=0, response_mime_type="application/json")
+
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model_name, messages=messages, temperature=0,
+            response = model.generate_content(
+                "\n\n".join(user_parts),
+                generation_config=generation_config,
             )
-            if response.choices[0].finish_reason == "content_filter":
+            candidate = response.candidates[0]
+            finish_name = candidate.finish_reason.name
+            if finish_name in ("SAFETY", "RECITATION", "BLOCKLIST"):
                 return None, "content_filter_response"
-            return response.choices[0].message.content.strip(), None
-        except RateLimitError:
+            text = candidate.content.parts[0].text.strip()
+            return text, None
+        except gcp_exceptions.ResourceExhausted:
             time.sleep(2 ** attempt * 5)
-        except APITimeoutError:
+        except gcp_exceptions.DeadlineExceeded:
             time.sleep(2 ** attempt * 3)
-        except APIError as error:
+        except gcp_exceptions.GoogleAPIError as error:
             body = str(error)
-            if "content_filter" in body.lower() or "content_management" in body.lower():
-                return None, "content_filter_input"
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
                 continue

@@ -19,10 +19,16 @@ Most downstream applications read the shared `prostate_text_data.csv` note
 source. Build it with:
 
 ```bash
-python shared/compile_prostate_notes.py --derive-prostate-mrns
+python shared/compile_prostate_notes.py
 ```
 
-The default data root is `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/`.
+By default, that command reads raw OncDRS notes and derives the cohort from
+raw OncDRS ICDs using the COMPASS ICD-based definition:
+patients with ICD-10 `C61`, excluding patients with a competing non-prostate
+primary ICD. By default it reads the raw OncDRS diagnosis source
+`/data/gusev/PROFILE/CLINICAL/OncDRS/ALL_2025_03/EHR_DIAGNOSIS.csv`.
+
+The default data root is `/data/gusev/USERS/jpconnor/data/LLM_annotations/`.
 Override it with `LLM_ANNOTATIONS_DATA_PATH`; the legacy `CAIA_COMPASS_DATA_PATH`
 is still accepted as a fallback.
 

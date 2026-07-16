@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument(
         "--mrn-file",
         type=Path,
-        required=True,
+        default=None,
         help="Text/CSV/TSV file containing the prostate DFCI_MRN values to compile.",
     )
     return parser.parse_args()
@@ -54,8 +54,6 @@ def parse_args():
 def main():
     args = parse_args()
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
-    if selected_mrns is None:
-        raise ValueError("A non-empty MRN selection is required.")
 
     raw_text_paths = resolve_raw_text_paths(args.raw_text_path)
     note_df = load_notes(
@@ -64,6 +62,11 @@ def main():
         raw_text_paths=raw_text_paths,
         selected_mrns=selected_mrns,
     )
+    if selected_mrns is None and not Path(args.notes_csv).exists():
+        raise ValueError(
+            "Raw-note fallback requires --mrns or --mrn-file. "
+            "Without an explicit MRN selection, --notes-csv must exist."
+        )
     write_note_bundle(
         args.output_path,
         note_df,
@@ -74,7 +77,11 @@ def main():
     print(f"Wrote compiled note bundle: {args.output_path}")
     print(f"Patients in bundle: {note_df['DFCI_MRN'].nunique()}")
     print(f"Notes in bundle: {len(note_df)}")
-    print(f"Requested MRNs: {len(selected_mrns)}")
+    print(
+        "Requested MRNs: all notes in CSV"
+        if selected_mrns is None
+        else f"Requested MRNs: {len(selected_mrns)}"
+    )
     print(f"Notes CSV preferred: {args.notes_csv}")
     print(f"Raw text directories fallback: {', '.join(str(path) for path in raw_text_paths)}")
 

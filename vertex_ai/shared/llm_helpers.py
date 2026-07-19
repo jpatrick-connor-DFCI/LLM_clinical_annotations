@@ -519,10 +519,13 @@ def _standardize_note_df(note_df):
     standardized = note_df.select(keep_cols)
     if "EVENT_DATE" in standardized.columns:
         standardized = standardized.with_columns(
+            # OncDRS EVENT_DATE/RPT_DATE values are ISO datetime strings that may carry a
+            # timezone offset (e.g. "2021-03-14T00:00:00-05:00"). Polars refuses to infer a
+            # format when a timezone is present, and we only want the calendar date anyway,
+            # so extract the leading YYYY-MM-DD directly rather than parsing to a datetime.
             pl.col("EVENT_DATE")
             .cast(pl.Utf8)
-            .str.to_datetime(strict=False)
-            .dt.strftime("%Y-%m-%d")
+            .str.extract(r"^(\d{4}-\d{2}-\d{2})", 1)
             .alias("EVENT_DATE")
         )
     standardized = standardized.sort(

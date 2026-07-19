@@ -2,6 +2,7 @@ import gzip
 import json
 import math
 import os
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -759,7 +760,40 @@ def build_client():
     )
 
 
+def _retry_after_seconds(error):
+    """Extract the server-requested wait (seconds) from a RateLimit/APIError, if any.
+
+    Azure OpenAI 429s carry the wait in the `Retry-After` response header (seconds)
+    or in the error body ("retry after N seconds"). Honoring it avoids retrying
+    straight back into the same throttle window."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+        if value:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+    match = re.search(r"retry after (\d+(?:\.\d+)?)\s*second", str(error), flags=re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _backoff_sleep(attempt, base, error=None, cap=120):
+    """Sleep with exponential backoff + jitter, preferring the server's Retry-After."""
+    server_wait = _retry_after_seconds(error) if error is not None else None
+    if server_wait is not None:
+        delay = server_wait
+    else:
+        delay = base * (2 ** attempt)
+    delay = min(delay, cap) + random.uniform(0, base)
+    time.sleep(delay)
+
+
 def call_with_retry(client, model_name, messages, max_retries=3):
+    last_error = None
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
@@ -771,21 +805,26 @@ def call_with_retry(client, model_name, messages, max_retries=3):
             if content is None:
                 return None, f"empty_response: finish_reason={response.choices[0].finish_reason}"
             return content.strip(), None
-        except RateLimitError:
-            time.sleep(2 ** attempt * 5)
-        except APITimeoutError:
-            time.sleep(2 ** attempt * 3)
+        except RateLimitError as error:
+            last_error = f"rate_limit: {str(error)[:200]}"
+            if attempt < max_retries - 1:
+                _backoff_sleep(attempt, base=5, error=error)
+        except APITimeoutError as error:
+            last_error = f"timeout: {str(error)[:200]}"
+            if attempt < max_retries - 1:
+                _backoff_sleep(attempt, base=3, error=error)
         except APIError as error:
             body = str(error)
             if "content_filter" in body.lower() or "content_management" in body.lower():
                 return None, "content_filter_input"
+            last_error = f"api_error: {body[:200]}"
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                _backoff_sleep(attempt, base=2, error=error)
                 continue
-            return None, f"api_error: {body[:200]}"
+            return None, last_error
         except Exception as error:  # noqa: BLE001
             return None, f"unexpected: {type(error).__name__}: {str(error)[:200]}"
-    return None, "max_retries_exceeded"
+    return None, last_error or "max_retries_exceeded"
 
 
 def parse_json_response(response_text):

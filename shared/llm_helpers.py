@@ -623,7 +623,7 @@ def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected
 
 
 # Snippet building
-SNIPPET_CONTEXT_CHARS = 6000
+SNIPPET_CONTEXT_CHARS = 2000
 SNIPPET_MAX_CHARS = 30000
 # Hard cap on total snippet chars per patient payload. 128k-token models at ~4 chars/token
 # give ~500k input chars; we budget ~300k for snippets to leave room for the system prompt,

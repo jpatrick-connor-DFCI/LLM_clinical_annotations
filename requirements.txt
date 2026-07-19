@@ -1,4 +1,5 @@
-pandas
+polars
+python-dateutil
 numpy
 tqdm
 ijson

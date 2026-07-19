@@ -31,7 +31,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -106,16 +106,18 @@ def _note_uid(mrn, note_date, snippet, raw_note_id):
 
 
 def _append_rows(path, rows, columns):
-    """Append rows to a TSV, writing the header only on the first write."""
+    """Append rows to a TSV, writing the header only on the first write.
+
+    Polars has no append mode for write_csv, so the CSV text is generated
+    in-memory and appended via a plain file handle.
+    """
     if not rows:
         return
-    pd.DataFrame(rows, columns=columns).to_csv(
-        path,
-        mode="a",
-        sep="\t",
-        index=False,
-        header=not path.exists() or path.stat().st_size == 0,
-    )
+    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
+    write_header = not path.exists() or path.stat().st_size == 0
+    text = df.write_csv(separator="\t", include_header=write_header)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def _records_to_tsv_rows(records):
@@ -190,8 +192,10 @@ def _parallel_scan_incremental(raw_text_paths, context_chars, max_workers, raw_p
 
     done = set()
     if scanned_path.exists() and scanned_path.stat().st_size > 0:
-        scanned_df = pd.read_csv(scanned_path, sep="\t", dtype=str)
-        done = set(scanned_df.loc[scanned_df["status"] == "ok", "file_path"])
+        scanned_df = pl.read_csv(scanned_path, separator="\t", infer_schema_length=0)
+        done = set(
+            scanned_df.filter(pl.col("status") == "ok")["file_path"].to_list()
+        )
 
     todo = [(fp, nt) for fp, nt in raw_files if str(fp) not in done]
     print(
@@ -247,24 +251,27 @@ def _build_evidence_from_raw(raw_path, evidence_path, note_types=None):
     keeping the earliest note_date for each unique pair.
     """
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        pd.DataFrame(columns=EVIDENCE_COLUMNS).to_csv(evidence_path, sep="\t", index=False)
+        pl.DataFrame(schema={c: pl.Utf8 for c in EVIDENCE_COLUMNS}).write_csv(
+            evidence_path, separator="\t"
+        )
         return 0
 
-    raw_df = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="warn")
+    raw_df = pl.read_csv(raw_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
 
     if note_types:
         wanted = {t.strip().lower() for t in note_types}
-        raw_df = raw_df[raw_df["note_type"].str.lower().isin(wanted)]
-        print(f"After note-type filter {list(note_types)}: {len(raw_df)} raw snippets")
+        raw_df = raw_df.filter(pl.col("note_type").str.to_lowercase().is_in(wanted))
+        print(f"After note-type filter {list(note_types)}: {raw_df.height} raw snippets")
 
-    # Sort so keep="first" in drop_duplicates retains the earliest note_date.
-    raw_df["_date_sort"] = pd.to_datetime(raw_df["note_date"], errors="coerce")
-    raw_df = raw_df.sort_values("_date_sort", na_position="last").drop(columns=["_date_sort"])
+    # Sort so keep="first" in unique() retains the earliest note_date.
+    raw_df = raw_df.with_columns(
+        pl.col("note_date").str.to_datetime(strict=False).alias("_date_sort")
+    ).sort("_date_sort", nulls_last=True).drop("_date_sort")
 
-    deduped = raw_df.drop_duplicates(subset=["DFCI_MRN", "snippet"], keep="first")
-    deduped = deduped.sort_values(["DFCI_MRN", "note_date"], na_position="last")
-    deduped.to_csv(evidence_path, sep="\t", index=False)
-    return len(deduped)
+    deduped = raw_df.unique(subset=["DFCI_MRN", "snippet"], keep="first", maintain_order=True)
+    deduped = deduped.sort(["DFCI_MRN", "note_date"], nulls_last=True)
+    deduped.write_csv(evidence_path, separator="\t")
+    return deduped.height
 
 
 # ---------------------------------------------------------------------------
@@ -275,14 +282,14 @@ def _load_and_scan_sequential(args, selected_mrns, context_chars):
     """Load notes from a non-default source and scan sequentially."""
     if args.note_bundle_path is not None:
         notes_df = load_note_bundle(args.note_bundle_path, selected_mrns)
-        print(f"Loaded bundle: {len(notes_df)} rows for {notes_df['DFCI_MRN'].nunique()} patients")
+        print(f"Loaded bundle: {len(notes_df)} rows for {notes_df['DFCI_MRN'].n_unique()} patients")
     elif args.notes_csv is not None:
         notes_df = load_notes_csv(args.notes_csv, selected_mrns)
-        print(f"Loaded CSV: {len(notes_df)} rows for {notes_df['DFCI_MRN'].nunique()} patients")
+        print(f"Loaded CSV: {len(notes_df)} rows for {notes_df['DFCI_MRN'].n_unique()} patients")
     else:
         raw_paths = args.raw_text_path or list(DEFAULT_STAGE_RAW_TEXT_PATHS)
         notes_df = load_raw_text_notes(raw_paths, selected_mrns)
-        print(f"Loaded {len(notes_df)} rows for {notes_df['DFCI_MRN'].nunique()} patients")
+        print(f"Loaded {len(notes_df)} rows for {notes_df['DFCI_MRN'].n_unique()} patients")
     return list(iter_note_snippets(notes_df, STAGE_TRIGGER_REGEX, context_chars=context_chars))
 
 
@@ -356,15 +363,23 @@ def run(args):
             before = len(records)
             records = [r for r in records if (r["note_type"] or "").lower() in wanted]
             print(f"After note-type filter {args.note_types}: {len(records)}/{before} snippets")
-        evidence_df = pd.DataFrame(_records_to_tsv_rows(records), columns=EVIDENCE_COLUMNS)
-        if not evidence_df.empty:
-            evidence_df = evidence_df.sort_values(["DFCI_MRN", "note_date"], na_position="last")
-        evidence_df.to_csv(evidence_path, sep="\t", index=False)
-        n = len(evidence_df)
+        tsv_rows = _records_to_tsv_rows(records)
+        if tsv_rows:
+            evidence_df = pl.DataFrame({c: [r.get(c) for r in tsv_rows] for c in EVIDENCE_COLUMNS})
+            evidence_df = evidence_df.sort(["DFCI_MRN", "note_date"], nulls_last=True)
+        else:
+            evidence_df = pl.DataFrame(schema={c: pl.Utf8 for c in EVIDENCE_COLUMNS})
+        evidence_df.write_csv(evidence_path, separator="\t")
+        n = evidence_df.height
 
     n_patients = 0
     if evidence_path.exists() and evidence_path.stat().st_size > 0:
-        n_patients = pd.read_csv(evidence_path, sep="\t", usecols=["DFCI_MRN"])["DFCI_MRN"].nunique()
+        n_patients = (
+            pl.scan_csv(evidence_path, separator="\t")
+            .select("DFCI_MRN")
+            .collect()["DFCI_MRN"]
+            .n_unique()
+        )
     print(f"Wrote {n} evidence snippets for {n_patients} patients: {evidence_path}")
 
 

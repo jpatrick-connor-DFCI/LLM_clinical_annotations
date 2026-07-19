@@ -19,7 +19,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -166,15 +166,18 @@ def parse_args():
 
 
 def append_rows(path, rows, columns):
+    """Append rows to a TSV, writing the header only on the first write.
+
+    Polars has no append mode for write_csv, so the CSV text is generated
+    in-memory and appended via a plain file handle.
+    """
     if not rows:
         return
-    pd.DataFrame(rows, columns=columns).to_csv(
-        path,
-        mode="a",
-        sep="\t",
-        index=False,
-        header=not path.exists() or path.stat().st_size == 0,
-    )
+    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
+    write_header = not path.exists() or path.stat().st_size == 0
+    text = df.write_csv(separator="\t", include_header=write_header)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def extract_patient(client, model, max_retries, mrn, chunks):
@@ -227,34 +230,38 @@ def raw_rows_from_findings(mrn, findings):
 
 
 def _to_int(value):
-    parsed = pd.to_numeric(value, errors="coerce")
-    if pd.isna(parsed):
+    if value is None:
         return None
-    return int(parsed)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def build_timeline(raw_path, timeline_path):
     """Resolve dates, validate, and de-duplicate raw extractions into the timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        pd.DataFrame(columns=TIMELINE_COLUMNS).to_csv(timeline_path, sep="\t", index=False)
+        pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS}).write_csv(
+            timeline_path, separator="\t"
+        )
         return 0
 
     # Read every field as text and validate per row, so a single malformed/misaligned
     # row (e.g. free-text that shifted columns) can't abort the whole timeline build.
-    raw = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="skip")
+    raw = pl.read_csv(raw_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
     seen = set()
     rows = []
     skipped = 0
-    for r in raw.itertuples(index=False):
-        mrn_val = pd.to_numeric(getattr(r, "DFCI_MRN", None), errors="coerce")
-        if pd.isna(mrn_val):
+    for r in raw.iter_rows(named=True):
+        mrn_val = _to_int(r.get("DFCI_MRN"))
+        if mrn_val is None:
             skipped += 1
             continue
-        mrn = int(mrn_val)
+        mrn = mrn_val
 
-        primary = _to_int(getattr(r, "gleason_primary", None))
-        secondary = _to_int(getattr(r, "gleason_secondary", None))
-        total = _to_int(getattr(r, "gleason_total", None))
+        primary = _to_int(r.get("gleason_primary"))
+        secondary = _to_int(r.get("gleason_secondary"))
+        total = _to_int(r.get("gleason_total"))
         # Gleason total is primary + secondary by definition; recompute it when
         # both patterns are present so an LLM arithmetic slip can't propagate.
         if primary is not None and secondary is not None:
@@ -267,14 +274,14 @@ def build_timeline(raw_path, timeline_path):
         if secondary is not None and not (1 <= secondary <= 5):
             continue
 
-        grade_group = _to_int(getattr(r, "grade_group", None))
+        grade_group = _to_int(r.get("grade_group"))
         if grade_group is None or not (1 <= grade_group <= 5):
             grade_group = derive_grade_group(primary, secondary)
 
         gleason_date, date_source = resolve_date(
-            getattr(r, "scoring_date", None), getattr(r, "source_note_date", None)
+            r.get("scoring_date"), r.get("source_note_date")
         )
-        specimen_type = getattr(r, "specimen_type", None)
+        specimen_type = r.get("specimen_type")
 
         key = (mrn, primary, secondary, total, gleason_date, specimen_type)
         if key in seen:
@@ -289,24 +296,28 @@ def build_timeline(raw_path, timeline_path):
             "gleason_total": total,
             "grade_group": grade_group,
             "specimen_type": specimen_type,
-            "is_historical_reference": getattr(r, "is_historical_reference", None),
-            "supporting_quote": getattr(r, "quote", None),
-            "source_note_date": getattr(r, "source_note_date", None),
+            "is_historical_reference": r.get("is_historical_reference"),
+            "supporting_quote": r.get("quote"),
+            "source_note_date": r.get("source_note_date"),
         })
 
     if skipped:
         print(f"  Skipped {skipped} malformed/misaligned raw rows during timeline build")
 
-    timeline = pd.DataFrame(rows, columns=TIMELINE_COLUMNS)
-    if not timeline.empty:
-        # Nullable Int64 so integer grades render as "3"/"<NA>", not "3.0"/"NaN".
-        for col in ("gleason_primary", "gleason_secondary", "gleason_total", "grade_group"):
-            timeline[col] = timeline[col].astype("Int64")
-        timeline = timeline.sort_values(
-            ["DFCI_MRN", "gleason_date"], na_position="last"
+    if not rows:
+        timeline = pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS})
+    else:
+        timeline = pl.DataFrame({c: [row.get(c) for row in rows] for c in TIMELINE_COLUMNS})
+        # Nullable Int64 so integer grades render as "3"/"", not "3.0"/"NaN".
+        int_cols = ["gleason_primary", "gleason_secondary", "gleason_total", "grade_group"]
+        timeline = timeline.with_columns(
+            [pl.col(c).cast(pl.Int64, strict=False) for c in int_cols]
         )
-    timeline.to_csv(timeline_path, sep="\t", index=False)
-    return len(timeline)
+        timeline = timeline.sort(
+            ["DFCI_MRN", "gleason_date"], nulls_last=True
+        )
+    timeline.write_csv(timeline_path, separator="\t")
+    return timeline.height
 
 
 def run(args):
@@ -328,7 +339,7 @@ def run(args):
     )
     print(
         f"Loaded notes: {len(notes_df)} rows for "
-        f"{notes_df['DFCI_MRN'].nunique()} patients"
+        f"{notes_df['DFCI_MRN'].n_unique()} patients"
     )
 
     if args.note_types:
@@ -349,8 +360,10 @@ def run(args):
 
     completed = set()
     if processed_path.exists() and processed_path.stat().st_size > 0:
-        log = pd.read_csv(processed_path, sep="\t")
-        completed = set(log.loc[log["status"] == "ok", "DFCI_MRN"].astype(int))
+        log = pl.read_csv(processed_path, separator="\t")
+        completed = set(
+            log.filter(pl.col("status") == "ok")["DFCI_MRN"].cast(pl.Int64).to_list()
+        )
     print(f"Already completed patients: {len(completed)}")
 
     todo = [m for m in sorted(patient_chunks) if m not in completed]

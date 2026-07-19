@@ -1,12 +1,14 @@
 import gzip
 import json
+import math
 import os
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
+from dateutil import parser as date_parser
 try:
     import ijson
 except ImportError:
@@ -275,17 +277,35 @@ Return ONLY valid JSON.
 """
 
 
+def _is_missing(value):
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return False
+
+
+def _to_numeric_scalar(value):
+    """Best-effort scalar -> float, returning None on failure (pd.to_numeric(errors='coerce') scalar analogue)."""
+    if _is_missing(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # MRN parsing
 def parse_mrn_values(values):
     mrns = set()
     for value in values:
-        if pd.isna(value):
+        if _is_missing(value):
             continue
         for token in re.split(r"[\s,|]+", str(value).strip()):
             if not token:
                 continue
-            mrn = pd.to_numeric(token, errors="coerce")
-            if pd.notna(mrn):
+            mrn = _to_numeric_scalar(token)
+            if mrn is not None:
                 mrns.add(int(mrn))
     return mrns
 
@@ -299,11 +319,11 @@ def load_selected_mrns(mrns_arg=None, mrn_file=None):
         suffix = mrn_file.suffix.lower()
         if suffix in {".csv", ".tsv"}:
             sep = "\t" if suffix == ".tsv" else ","
-            mrn_df = pd.read_csv(mrn_file, sep=sep, low_memory=False)
+            mrn_df = pl.read_csv(mrn_file, separator=sep, infer_schema_length=None)
             if "DFCI_MRN" in mrn_df.columns:
-                selected.update(parse_mrn_values(mrn_df["DFCI_MRN"]))
-            elif not mrn_df.empty:
-                selected.update(parse_mrn_values(mrn_df.iloc[:, 0]))
+                selected.update(parse_mrn_values(mrn_df["DFCI_MRN"].to_list()))
+            elif mrn_df.height > 0:
+                selected.update(parse_mrn_values(mrn_df[:, 0].to_list()))
         else:
             with open(mrn_file, "r", encoding="utf-8") as handle:
                 selected.update(parse_mrn_values(handle.readlines()))
@@ -311,12 +331,13 @@ def load_selected_mrns(mrns_arg=None, mrn_file=None):
 
 
 def normalize_mrn_column(df):
-    if df.empty or "DFCI_MRN" not in df.columns:
+    if df.is_empty() or "DFCI_MRN" not in df.columns:
         return df
-    work = df.copy()
-    work["DFCI_MRN"] = pd.to_numeric(work["DFCI_MRN"], errors="coerce")
-    work = work.dropna(subset=["DFCI_MRN"])
-    work["DFCI_MRN"] = work["DFCI_MRN"].astype(int)
+    work = df.with_columns(
+        pl.col("DFCI_MRN").cast(pl.Float64, strict=False).alias("DFCI_MRN")
+    )
+    work = work.drop_nulls(subset=["DFCI_MRN"])
+    work = work.with_columns(pl.col("DFCI_MRN").cast(pl.Int64))
     return work
 
 
@@ -350,10 +371,21 @@ def deduplicate_texts(text_entries):
 
 
 def to_iso_date(value):
-    if pd.isna(value):
+    """Parse a scalar date-like value to an ISO 'YYYY-MM-DD' string, or None.
+
+    Uses dateutil (not a columnar polars op) because this is called per-scalar,
+    often millions of times across snippet building; batching isn't applicable here.
+    """
+    if _is_missing(value):
         return None
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
+    if isinstance(value, (datetime,)):
+        return value.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    try:
+        parsed = date_parser.parse(text)
+    except (ValueError, OverflowError, TypeError):
         return None
     return parsed.strftime("%Y-%m-%d")
 
@@ -420,8 +452,8 @@ def iter_raw_docs_from_file(path):
 
 
 def build_raw_note_row(note, note_type, source_file):
-    mrn = pd.to_numeric(note.get("DFCI_MRN"), errors="coerce")
-    if pd.isna(mrn):
+    mrn = _to_numeric_scalar(note.get("DFCI_MRN"))
+    if mrn is None:
         return None
     text_entries = [v for k, v in note.items() if "TEXT" in str(k).upper()]
     text = basic_clean_text(" ".join(deduplicate_texts(text_entries)))
@@ -465,39 +497,49 @@ def load_raw_text_notes(raw_text_paths, selected_mrns):
     rows = []
     for file_path, note_type in raw_files:
         for note in iter_raw_docs_from_file(file_path):
-            mrn = pd.to_numeric(note.get("DFCI_MRN"), errors="coerce")
-            if pd.isna(mrn) or int(mrn) not in selected_mrns:
+            mrn = _to_numeric_scalar(note.get("DFCI_MRN"))
+            if mrn is None or int(mrn) not in selected_mrns:
                 continue
             row = build_raw_note_row(note, note_type, file_path)
             if row is not None:
                 rows.append(row)
-    df = normalize_mrn_column(pd.DataFrame(rows))
-    if df.empty:
+    if not rows:
+        raise ValueError("No raw notes were found for the requested MRNs.")
+    df = normalize_mrn_column(pl.DataFrame(rows, infer_schema_length=None))
+    if df.is_empty():
         raise ValueError("No raw notes were found for the requested MRNs.")
     return df
 
 
-def write_note_bundle(path, note_df, *, raw_text_paths=None, selected_mrns=None):
-    if note_df.empty:
-        standardized = pd.DataFrame(columns=list(NOTE_BUNDLE_COLUMNS))
-    else:
-        keep_cols = [c for c in NOTE_BUNDLE_COLUMNS if c in note_df.columns]
-        standardized = note_df[keep_cols].copy()
-        if "EVENT_DATE" in standardized.columns:
-            standardized["EVENT_DATE"] = pd.to_datetime(
-                standardized["EVENT_DATE"], errors="coerce"
-            ).dt.strftime("%Y-%m-%d")
-        standardized = standardized.sort_values(
-            ["DFCI_MRN", "EVENT_DATE", "NOTE_TYPE"], na_position="last"
+def _standardize_note_df(note_df):
+    """Select bundle columns, normalize EVENT_DATE to ISO strings, sort deterministically."""
+    if note_df.is_empty():
+        return pl.DataFrame(schema={c: pl.Utf8 for c in NOTE_BUNDLE_COLUMNS})
+    keep_cols = [c for c in NOTE_BUNDLE_COLUMNS if c in note_df.columns]
+    standardized = note_df.select(keep_cols)
+    if "EVENT_DATE" in standardized.columns:
+        standardized = standardized.with_columns(
+            pl.col("EVENT_DATE")
+            .cast(pl.Utf8)
+            .str.to_datetime(strict=False)
+            .dt.strftime("%Y-%m-%d")
+            .alias("EVENT_DATE")
         )
-    serializable = standardized.copy().astype(object).where(pd.notna(standardized), None)
+    standardized = standardized.sort(
+        ["DFCI_MRN", "EVENT_DATE", "NOTE_TYPE"], nulls_last=True
+    )
+    return standardized
+
+
+def write_note_bundle(path, note_df, *, raw_text_paths=None, selected_mrns=None):
+    standardized = _standardize_note_df(note_df)
     payload = {
         "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "requested_mrn_count": len(selected_mrns) if selected_mrns is not None else None,
-        "patient_count": int(standardized["DFCI_MRN"].nunique()) if not standardized.empty else 0,
-        "note_count": int(len(standardized)),
+        "patient_count": int(standardized["DFCI_MRN"].n_unique()) if not standardized.is_empty() else 0,
+        "note_count": int(standardized.height),
         "raw_text_paths": [str(p) for p in raw_text_paths] if raw_text_paths else None,
-        "notes": serializable.to_dict(orient="records") if not standardized.empty else [],
+        "notes": standardized.to_dicts() if not standardized.is_empty() else [],
     }
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -506,21 +548,11 @@ def write_note_bundle(path, note_df, *, raw_text_paths=None, selected_mrns=None)
 
 
 def write_notes_csv(path, note_df):
-    if note_df.empty:
-        standardized = pd.DataFrame(columns=list(NOTE_BUNDLE_COLUMNS))
-    else:
-        keep_cols = [c for c in NOTE_BUNDLE_COLUMNS if c in note_df.columns]
-        standardized = note_df[keep_cols].copy()
-        if "EVENT_DATE" in standardized.columns:
-            standardized["EVENT_DATE"] = pd.to_datetime(
-                standardized["EVENT_DATE"], errors="coerce"
-            ).dt.strftime("%Y-%m-%d")
-        standardized = standardized.sort_values(
-            ["DFCI_MRN", "EVENT_DATE", "NOTE_TYPE"], na_position="last"
-        )
+    """Write standardized note rows to a CSV (the default LLM-pipeline note source)."""
+    standardized = _standardize_note_df(note_df)
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    standardized.to_csv(output_path, index=False)
+    standardized.write_csv(output_path)
     return standardized
 
 
@@ -536,30 +568,35 @@ def load_note_bundle(path, selected_mrns=None):
         records = payload
     else:
         records = []
-    df = normalize_mrn_column(pd.DataFrame(records))
-    if df.empty:
+    df = normalize_mrn_column(pl.DataFrame(records, infer_schema_length=None) if records else pl.DataFrame())
+    if df.is_empty():
         raise ValueError(f"No note rows in bundle: {bundle_path}")
     if selected_mrns is not None:
-        df = df.loc[df["DFCI_MRN"].isin(selected_mrns)].copy()
-        if df.empty:
+        df = df.filter(pl.col("DFCI_MRN").is_in(selected_mrns))
+        if df.is_empty():
             raise ValueError("No notes after MRN filter.")
     return df
 
 
 def load_notes_csv(csv_path, selected_mrns=None):
+    """Load the compiled prostate notes CSV produced by compile_prostate_notes.py.
+
+    Uses a lazy scan so the MRN filter (when given) is pushed down during the
+    multi-threaded CSV read instead of materializing the full file first.
+    """
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"Prostate notes CSV not found: {csv_path}")
-    df = pd.read_csv(csv_path, low_memory=False)
-    if "CLINICAL_TEXT" not in df.columns:
+    lazy = pl.scan_csv(csv_path, infer_schema_length=None)
+    if "CLINICAL_TEXT" not in lazy.collect_schema().names():
         raise ValueError(f"Prostate notes CSV missing CLINICAL_TEXT column: {csv_path}")
-    df = normalize_mrn_column(df)
-    if df.empty:
-        raise ValueError(f"No note rows in CSV: {csv_path}")
     if selected_mrns is not None:
-        df = df.loc[df["DFCI_MRN"].isin(selected_mrns)].copy()
-        if df.empty:
-            raise ValueError("No notes after MRN filter.")
+        lazy = lazy.filter(
+            pl.col("DFCI_MRN").cast(pl.Float64, strict=False).cast(pl.Int64, strict=False).is_in(selected_mrns)
+        )
+    df = normalize_mrn_column(lazy.collect())
+    if df.is_empty():
+        raise ValueError(f"No note rows in CSV: {csv_path}")
     return df
 
 
@@ -580,6 +617,9 @@ def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected
 # Snippet building
 SNIPPET_CONTEXT_CHARS = 6000
 SNIPPET_MAX_CHARS = 30000
+# Hard cap on total snippet chars per patient payload. 128k-token models at ~4 chars/token
+# give ~500k input chars; we budget ~300k for snippets to leave room for the system prompt,
+# JSON scaffolding, and output.
 PATIENT_PAYLOAD_MAX_CHARS = 300000
 
 
@@ -638,13 +678,13 @@ def build_patient_snippets(
     `max_notes_per_patient` or the cumulative `payload_max_chars` budget is hit
     (whichever comes first), so outlier patients can't exceed the model's context window.
     """
-    if notes_df.empty:
+    if notes_df.is_empty():
         return {}
 
     candidates = {}
-    for row in notes_df.itertuples(index=False):
-        raw_text = getattr(row, "CLINICAL_TEXT", None) or ""
-        note_type = getattr(row, "NOTE_TYPE", None) or "Unknown"
+    for row in notes_df.iter_rows(named=True):
+        raw_text = row.get("CLINICAL_TEXT") or ""
+        note_type = row.get("NOTE_TYPE") or "Unknown"
         cleaned = clean_note(raw_text, note_type=note_type)
         if not cleaned:
             continue
@@ -654,10 +694,10 @@ def build_patient_snippets(
         snippet = build_snippet(cleaned, matches, max_chars=snippet_max_chars)
         if not snippet:
             continue
-        mrn = int(row.DFCI_MRN)
+        mrn = int(row["DFCI_MRN"])
         categories = sorted({m[0] for m in matches})
         candidates.setdefault(mrn, []).append({
-            "note_date": to_iso_date(getattr(row, "EVENT_DATE", None)),
+            "note_date": to_iso_date(row.get("EVENT_DATE")),
             "note_type": note_type,
             "trigger_categories": categories,
             "trigger_count": len(matches),

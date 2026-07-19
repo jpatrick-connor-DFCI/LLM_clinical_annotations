@@ -75,7 +75,7 @@ def main():
     )
 
     print(f"Wrote compiled note bundle: {args.output_path}")
-    print(f"Patients in bundle: {note_df['DFCI_MRN'].nunique()}")
+    print(f"Patients in bundle: {note_df['DFCI_MRN'].n_unique()}")
     print(f"Notes in bundle: {len(note_df)}")
     print(
         "Requested MRNs: all notes in CSV"

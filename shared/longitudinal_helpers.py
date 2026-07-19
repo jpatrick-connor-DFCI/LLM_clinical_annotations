@@ -9,9 +9,10 @@ utilities those pipelines share.
 """
 
 import hashlib
+import math
 import re
 
-import pandas as pd
+import polars as pl
 
 # Reused, trigger-agnostic plumbing from the shared LLM helpers.
 from shared.llm_helpers import (  # noqa: E402,F401
@@ -66,15 +67,14 @@ def filter_note_types(notes_df, note_types):
     if not note_types:
         return notes_df
     wanted = {str(t).strip().lower() for t in note_types}
-    mask = notes_df["NOTE_TYPE"].astype(str).str.lower().isin(wanted)
-    return notes_df.loc[mask].copy()
+    return notes_df.filter(pl.col("NOTE_TYPE").cast(pl.Utf8).str.to_lowercase().is_in(wanted))
 
 
 def _note_uid(mrn, note_date, snippet, raw_note_id):
     """Stable per-note identifier for resumability/dedup.
 
     Prefers the source RAW_NOTE_ID; otherwise hashes (mrn, date, snippet head)."""
-    if raw_note_id is not None and not pd.isna(raw_note_id):
+    if raw_note_id is not None and not (isinstance(raw_note_id, float) and math.isnan(raw_note_id)):
         return str(raw_note_id)
     key = f"{int(mrn)}|{note_date or ''}|{snippet[:200]}"
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
@@ -94,14 +94,14 @@ def iter_note_snippets(
     cleaned snippet text are collapsed per patient, keeping the EARLIEST note_date
     as the provenance/fallback date (so criterion-onset dates are not inflated).
     """
-    if notes_df.empty:
+    if notes_df.is_empty():
         return
 
     # (mrn, snippet) -> chosen record, keeping the earliest note_date.
     deduped = {}
-    for row in notes_df.itertuples(index=False):
-        raw_text = getattr(row, "CLINICAL_TEXT", None) or ""
-        note_type = getattr(row, "NOTE_TYPE", None) or "Unknown"
+    for row in notes_df.iter_rows(named=True):
+        raw_text = row.get("CLINICAL_TEXT") or ""
+        note_type = row.get("NOTE_TYPE") or "Unknown"
         cleaned = clean_note(raw_text, note_type=note_type)
         if not cleaned:
             continue
@@ -113,11 +113,11 @@ def iter_note_snippets(
         )
         if not snippet:
             continue
-        mrn = int(row.DFCI_MRN)
-        note_date = to_iso_date(getattr(row, "EVENT_DATE", None))
+        mrn = int(row["DFCI_MRN"])
+        note_date = to_iso_date(row.get("EVENT_DATE"))
         record = {
             "note_uid": _note_uid(
-                mrn, note_date, snippet, getattr(row, "RAW_NOTE_ID", None)
+                mrn, note_date, snippet, row.get("RAW_NOTE_ID")
             ),
             "DFCI_MRN": mrn,
             "note_date": note_date,

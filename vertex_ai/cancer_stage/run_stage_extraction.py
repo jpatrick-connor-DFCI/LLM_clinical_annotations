@@ -21,13 +21,14 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -112,17 +113,16 @@ def group_evidence_chunks(evidence_df, payload_max_chars):
     chunks and therefore multiple LLM calls.
     """
     by_mrn = {}
-    for row in evidence_df.itertuples(index=False):
-        mrn = int(row.DFCI_MRN)
+    for row in evidence_df.iter_rows(named=True):
+        mrn = int(row["DFCI_MRN"])
+        trigger_categories = row.get("trigger_categories")
         by_mrn.setdefault(mrn, []).append({
-            "note_date": row.note_date if pd.notna(row.note_date) else None,
-            "note_type": row.note_type if pd.notna(row.note_type) else "Unknown",
+            "note_date": row.get("note_date"),
+            "note_type": row.get("note_type") or "Unknown",
             "trigger_categories": (
-                str(row.trigger_categories).split(",")
-                if pd.notna(row.trigger_categories) and row.trigger_categories
-                else []
+                str(trigger_categories).split(",") if trigger_categories else []
             ),
-            "snippet": row.snippet if pd.notna(row.snippet) else "",
+            "snippet": row.get("snippet") or "",
         })
 
     patient_chunks = {}
@@ -214,50 +214,64 @@ def raw_rows_from_findings(mrn, findings):
 
 
 def append_rows(path, rows, columns):
+    """Append rows to a TSV, writing the header only on the first write.
+
+    Polars has no append mode for write_csv, so the CSV text is generated
+    in-memory and appended via a plain file handle.
+    """
     if not rows:
         return
-    pd.DataFrame(rows, columns=columns).to_csv(
-        path,
-        mode="a",
-        sep="\t",
-        index=False,
-        header=not path.exists() or path.stat().st_size == 0,
-    )
+    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
+    write_header = not path.exists() or path.stat().st_size == 0
+    text = df.write_csv(separator="\t", include_header=write_header)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def _str(val):
     """Return val as a stripped string, treating None and NaN as empty string."""
     if val is None:
         return ""
-    try:
-        if pd.isna(val):
-            return ""
-    except (TypeError, ValueError):
-        pass
+    if isinstance(val, float) and math.isnan(val):
+        return ""
     return str(val).strip()
+
+
+def _to_numeric_scalar(value):
+    """Best-effort scalar -> float, returning None on failure."""
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_timeline(raw_path, timeline_path):
     """Deduplicate raw findings into the stage timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        pd.DataFrame(columns=TIMELINE_COLUMNS).to_csv(timeline_path, sep="\t", index=False)
+        pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS}).write_csv(
+            timeline_path, separator="\t"
+        )
         return 0
 
-    raw = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="skip")
+    raw = pl.read_csv(raw_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
     seen = set()
     rows = []
-    for r in raw.itertuples(index=False):
-        mrn_val = pd.to_numeric(getattr(r, "DFCI_MRN", None), errors="coerce")
-        if pd.isna(mrn_val):
+    for r in raw.iter_rows(named=True):
+        mrn_val = _to_numeric_scalar(r.get("DFCI_MRN"))
+        if mrn_val is None:
             continue
         mrn = int(mrn_val)
 
         # Normalize dedup key fields so formatting differences don't create duplicates.
-        cancer_type_raw = _str(getattr(r, "cancer_type", None))
-        stage_group_raw = _str(getattr(r, "stage_group", None))
+        cancer_type_raw = _str(r.get("cancer_type"))
+        stage_group_raw = _str(r.get("stage_group"))
 
         stage_date, date_source = resolve_date(
-            getattr(r, "stage_date", None), getattr(r, "source_note_date", None)
+            r.get("stage_date"), r.get("source_note_date")
         )
 
         key = (
@@ -276,32 +290,36 @@ def build_timeline(raw_path, timeline_path):
             "stage_group": stage_group_raw or None,
             "stage_date": stage_date,
             "date_source": date_source,
-            "is_historical_reference": getattr(r, "is_historical_reference", None),
-            "supporting_quote": getattr(r, "supporting_quote", None),
-            "confidence": getattr(r, "confidence", None),
-            "source_note_date": getattr(r, "source_note_date", None),
+            "is_historical_reference": r.get("is_historical_reference"),
+            "supporting_quote": r.get("supporting_quote"),
+            "confidence": r.get("confidence"),
+            "source_note_date": r.get("source_note_date"),
         })
 
-    timeline = pd.DataFrame(rows, columns=TIMELINE_COLUMNS)
-    if not timeline.empty:
-        timeline = timeline.sort_values(
-            ["DFCI_MRN", "cancer_type", "stage_date"], na_position="last"
+    if not rows:
+        timeline = pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS})
+    else:
+        timeline = pl.DataFrame({c: [row.get(c) for row in rows] for c in TIMELINE_COLUMNS})
+        timeline = timeline.sort(
+            ["DFCI_MRN", "cancer_type", "stage_date"], nulls_last=True
         )
         # Keep only rows where stage_group changes within each (patient, cancer_type).
         # This collapses repeated identical staging entries over time — once a stage
         # is established (including metastatic/IV), subsequent rows with the same
         # stage add no new information.
         last_stage = {}
-        keep = []
-        for idx, row in timeline.iterrows():
+        keep_mask = []
+        for row in timeline.iter_rows(named=True):
             key = (row["DFCI_MRN"], (_str(row["cancer_type"])).lower())
             curr = (_str(row["stage_group"])).upper()
             if last_stage.get(key) != curr:
-                keep.append(idx)
+                keep_mask.append(True)
                 last_stage[key] = curr
-        timeline = timeline.loc[keep]
-    timeline.to_csv(timeline_path, sep="\t", index=False)
-    return len(timeline)
+            else:
+                keep_mask.append(False)
+        timeline = timeline.filter(pl.Series(keep_mask))
+    timeline.write_csv(timeline_path, separator="\t")
+    return timeline.height
 
 
 def run(args):
@@ -321,20 +339,22 @@ def run(args):
         for path in (raw_path, processed_path, timeline_path):
             path.unlink(missing_ok=True)
 
-    evidence_df = pd.read_csv(evidence_path, sep="\t", dtype=str)
-    evidence_df["DFCI_MRN"] = pd.to_numeric(evidence_df["DFCI_MRN"], errors="coerce")
-    evidence_df = evidence_df.dropna(subset=["DFCI_MRN"])
-    evidence_df["DFCI_MRN"] = evidence_df["DFCI_MRN"].astype(int)
+    evidence_df = pl.read_csv(evidence_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
+    evidence_df = evidence_df.with_columns(
+        pl.col("DFCI_MRN").cast(pl.Float64, strict=False).alias("DFCI_MRN")
+    ).drop_nulls(subset=["DFCI_MRN"]).with_columns(
+        pl.col("DFCI_MRN").cast(pl.Int64)
+    )
     print(
-        f"Loaded evidence: {len(evidence_df)} snippets for "
-        f"{evidence_df['DFCI_MRN'].nunique()} patients"
+        f"Loaded evidence: {evidence_df.height} snippets for "
+        f"{evidence_df['DFCI_MRN'].n_unique()} patients"
     )
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
     if selected_mrns is not None:
-        evidence_df = evidence_df.loc[evidence_df["DFCI_MRN"].isin(selected_mrns)].copy()
-        print(f"After MRN filter: {len(evidence_df)} snippets for "
-              f"{evidence_df['DFCI_MRN'].nunique()} patients")
+        evidence_df = evidence_df.filter(pl.col("DFCI_MRN").is_in(selected_mrns))
+        print(f"After MRN filter: {evidence_df.height} snippets for "
+              f"{evidence_df['DFCI_MRN'].n_unique()} patients")
 
     patient_chunks = group_evidence_chunks(evidence_df, args.payload_max_chars)
     total_chunks = sum(len(c) for c in patient_chunks.values())
@@ -345,8 +365,10 @@ def run(args):
 
     completed = set()
     if processed_path.exists() and processed_path.stat().st_size > 0:
-        log = pd.read_csv(processed_path, sep="\t")
-        completed = set(log.loc[log["status"] == "ok", "DFCI_MRN"].astype(int))
+        log = pl.read_csv(processed_path, separator="\t")
+        completed = set(
+            log.filter(pl.col("status") == "ok")["DFCI_MRN"].cast(pl.Int64).to_list()
+        )
     print(f"Already completed patients: {len(completed)}")
 
     todo = [m for m in sorted(patient_chunks) if m not in completed]

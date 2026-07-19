@@ -16,11 +16,12 @@ Outputs (under <output-dir>):
 
 import argparse
 import json
+import math
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -193,15 +194,18 @@ def parse_args():
 
 
 def append_rows(path, rows, columns):
+    """Append rows to a TSV, writing the header only on the first write.
+
+    Polars has no append mode for write_csv, so the CSV text is generated
+    in-memory and appended via a plain file handle.
+    """
     if not rows:
         return
-    pd.DataFrame(rows, columns=columns).to_csv(
-        path,
-        mode="a",
-        sep="\t",
-        index=False,
-        header=not path.exists() or path.stat().st_size == 0,
-    )
+    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
+    write_header = not path.exists() or path.stat().st_size == 0
+    text = df.write_csv(separator="\t", include_header=write_header)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def extract_patient(client, model, max_retries, mrn, chunks):
@@ -258,30 +262,44 @@ def raw_rows_from_findings(mrn, findings):
     return rows
 
 
+def _to_numeric_scalar(value):
+    """Best-effort scalar -> float, returning None on failure."""
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_timeline(raw_path, timeline_path):
     """Aggregate raw per-finding criteria into a per-patient onset timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        pd.DataFrame(columns=TIMELINE_COLUMNS).to_csv(timeline_path, sep="\t", index=False)
+        pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS}).write_csv(
+            timeline_path, separator="\t"
+        )
         return 0
 
     # Read every field as text and validate per row, so a single malformed/misaligned
     # row (e.g. free-text that shifted columns) can't abort the whole timeline build.
-    raw = pd.read_csv(raw_path, sep="\t", dtype=str, on_bad_lines="skip")
+    raw = pl.read_csv(raw_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
 
     # For each (patient, criterion) keep the earliest documented occurrence as its onset.
     onsets = {}  # (mrn, criterion) -> establishing record
     skipped = 0
-    for r in raw.itertuples(index=False):
-        criterion = getattr(r, "criterion", None)
+    for r in raw.iter_rows(named=True):
+        criterion = r.get("criterion")
         if criterion not in VALID_CRITERIA:
             continue
-        mrn_val = pd.to_numeric(getattr(r, "DFCI_MRN", None), errors="coerce")
-        if pd.isna(mrn_val):
+        mrn_val = _to_numeric_scalar(r.get("DFCI_MRN"))
+        if mrn_val is None:
             skipped += 1
             continue
         mrn = int(mrn_val)
         event_date, date_source = resolve_date(
-            getattr(r, "diagnosis_date", None), getattr(r, "source_note_date", None)
+            r.get("diagnosis_date"), r.get("source_note_date")
         )
         record = {
             "DFCI_MRN": mrn,
@@ -289,11 +307,11 @@ def build_timeline(raw_path, timeline_path):
             "criterion_label": CRITERION_LABELS[criterion],
             "event_date": event_date,
             "date_source": date_source,
-            "modality": getattr(r, "modality", None),
-            "visceral_met_pattern": getattr(r, "visceral_met_pattern", None),
-            "supporting_quote": getattr(r, "quote", None),
-            "confidence": getattr(r, "confidence", None),
-            "source_note_date": getattr(r, "source_note_date", None),
+            "modality": r.get("modality"),
+            "visceral_met_pattern": r.get("visceral_met_pattern"),
+            "supporting_quote": r.get("quote"),
+            "confidence": r.get("confidence"),
+            "source_note_date": r.get("source_note_date"),
         }
         key = (mrn, criterion)
         existing = onsets.get(key)
@@ -325,9 +343,12 @@ def build_timeline(raw_path, timeline_path):
             out["num_criteria_to_date"] = len(cumulative)
             rows.append(out)
 
-    timeline = pd.DataFrame(rows, columns=TIMELINE_COLUMNS)
-    timeline.to_csv(timeline_path, sep="\t", index=False)
-    return len(timeline)
+    if rows:
+        timeline = pl.DataFrame({c: [row.get(c) for row in rows] for c in TIMELINE_COLUMNS})
+    else:
+        timeline = pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS})
+    timeline.write_csv(timeline_path, separator="\t")
+    return timeline.height
 
 
 def run(args):
@@ -349,7 +370,7 @@ def run(args):
     )
     print(
         f"Loaded notes: {len(notes_df)} rows for "
-        f"{notes_df['DFCI_MRN'].nunique()} patients"
+        f"{notes_df['DFCI_MRN'].n_unique()} patients"
     )
 
     if args.note_types:
@@ -370,8 +391,10 @@ def run(args):
 
     completed = set()
     if processed_path.exists() and processed_path.stat().st_size > 0:
-        log = pd.read_csv(processed_path, sep="\t")
-        completed = set(log.loc[log["status"] == "ok", "DFCI_MRN"].astype(int))
+        log = pl.read_csv(processed_path, separator="\t")
+        completed = set(
+            log.filter(pl.col("status") == "ok")["DFCI_MRN"].cast(pl.Int64).to_list()
+        )
     print(f"Already completed patients: {len(completed)}")
 
     todo = [m for m in sorted(patient_chunks) if m not in completed]

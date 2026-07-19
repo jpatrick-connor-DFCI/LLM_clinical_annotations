@@ -4,7 +4,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -76,26 +76,26 @@ def parse_args():
     return parser.parse_args()
 
 
+def _append_tsv_row(path, row, columns):
+    """Append a single row to a TSV, writing the header only on first write.
+
+    Polars has no append mode for write_csv, so the header/row text is written
+    directly with a file handle kept open in append mode.
+    """
+    write_header = not path.exists() or path.stat().st_size == 0
+    df = pl.DataFrame({c: [row.get(c)] for c in columns})
+    text = df.write_csv(separator="\t", include_header=write_header)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def append_row(path, row):
-    pd.DataFrame([row], columns=OUTPUT_COLUMNS).to_csv(
-        path,
-        mode="a",
-        sep="\t",
-        index=False,
-        header=not path.exists() or path.stat().st_size == 0,
-    )
+    _append_tsv_row(path, row, OUTPUT_COLUMNS)
 
 
 def append_failure(path, mrn, error, num_snippets):
-    pd.DataFrame(
-        [{"DFCI_MRN": int(mrn), "error": error, "num_snippets": int(num_snippets)}]
-    ).to_csv(
-        path,
-        mode="a",
-        sep="\t",
-        index=False,
-        header=not path.exists() or path.stat().st_size == 0,
-    )
+    row = {"DFCI_MRN": int(mrn), "error": error, "num_snippets": int(num_snippets)}
+    _append_tsv_row(path, row, list(row.keys()))
 
 
 def classify_patient(client, model, max_retries, mrn, snippets):
@@ -206,13 +206,13 @@ def run(args):
     )
     print(
         f"Loaded notes: {len(notes_df)} rows for "
-        f"{notes_df['DFCI_MRN'].nunique()} patients"
+        f"{notes_df['DFCI_MRN'].n_unique()} patients"
     )
 
     patient_snippets = build_patient_snippets(
         notes_df, max_notes_per_patient=args.max_notes_per_patient
     )
-    all_mrns = set(notes_df["DFCI_MRN"].astype(int).unique())
+    all_mrns = set(notes_df["DFCI_MRN"].cast(pl.Int64).unique().to_list())
     triggered_mrns = set(patient_snippets.keys())
     no_signal_mrns = all_mrns - triggered_mrns
 
@@ -221,7 +221,9 @@ def run(args):
 
     completed = set()
     if output_path.exists() and output_path.stat().st_size > 0:
-        completed = set(pd.read_csv(output_path, sep="\t")["DFCI_MRN"].astype(int))
+        completed = set(
+            pl.read_csv(output_path, separator="\t")["DFCI_MRN"].cast(pl.Int64).to_list()
+        )
     print(f"Already completed: {len(completed)}")
 
     for mrn in sorted(no_signal_mrns - completed):

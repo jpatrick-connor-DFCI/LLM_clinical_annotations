@@ -23,7 +23,7 @@ import argparse
 import sys
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 CURRENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CURRENT_DIR.parent
@@ -48,8 +48,8 @@ def derive_prostate_mrns(cohort_source):
     cohort_source = Path(cohort_source)
     if not cohort_source.exists():
         raise FileNotFoundError(f"Cohort source not found: {cohort_source}")
-    cohort = pd.read_csv(cohort_source, usecols=["DFCI_MRN"])
-    return parse_mrn_values(cohort["DFCI_MRN"])
+    cohort = pl.scan_csv(cohort_source).select("DFCI_MRN").collect()
+    return parse_mrn_values(cohort["DFCI_MRN"].to_list())
 
 
 def parse_args():
@@ -112,7 +112,7 @@ def main():
 
     print(f"Wrote prostate notes CSV: {args.output_path}")
     print(f"Cohort MRNs requested: {len(selected_mrns)}")
-    print(f"Patients with notes: {standardized['DFCI_MRN'].nunique()}")
+    print(f"Patients with notes: {standardized['DFCI_MRN'].n_unique()}")
     print(f"Notes written: {len(standardized)}")
     print(f"Cohort source used: {args.cohort_source}")
     print(f"Raw text directories searched: {', '.join(str(p) for p in raw_text_paths)}")

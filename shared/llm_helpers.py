@@ -1,11 +1,14 @@
 import gzip
+import hashlib
 import json
 import math
 import os
 import random
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import polars as pl
@@ -599,7 +602,15 @@ def load_notes_csv(csv_path, selected_mrns=None):
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"Prostate notes CSV not found: {csv_path}")
-    lazy = pl.scan_csv(csv_path, infer_schema_length=None)
+    # Read every known column as Utf8 rather than scanning the whole file to infer
+    # types (infer_schema_length=None). The snippet builder treats all fields as
+    # strings anyway, and DFCI_MRN is normalized numerically downstream, so a fixed
+    # Utf8 schema is both faster to load and safe. Unknown columns still infer.
+    lazy = pl.scan_csv(
+        csv_path,
+        schema_overrides={c: pl.Utf8 for c in NOTE_BUNDLE_COLUMNS},
+        infer_schema_length=1000,
+    )
     if "CLINICAL_TEXT" not in lazy.collect_schema().names():
         raise ValueError(f"Prostate notes CSV missing CLINICAL_TEXT column: {csv_path}")
     if selected_mrns is not None:
@@ -610,6 +621,21 @@ def load_notes_csv(csv_path, selected_mrns=None):
     if df.is_empty():
         raise ValueError(f"No note rows in CSV: {csv_path}")
     return df
+
+
+def resolve_note_source(*, csv_path=None, bundle_path=None):
+    """Return (source_label, source_path) for the note source load_notes would pick.
+
+    Mirrors load_notes' precedence without reading the data, so callers can log
+    which source is in use before paying to load it. The raw-JSON path is much
+    slower than the CSV/bundle, so surfacing an accidental fall-through matters.
+    """
+    if bundle_path is not None and Path(bundle_path).exists():
+        return "bundle", Path(bundle_path)
+    csv_path = csv_path or PROSTATE_TEXT_CSV
+    if Path(csv_path).exists():
+        return "csv", Path(csv_path)
+    return "raw_json", None
 
 
 def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected_mrns=None):
@@ -627,15 +653,18 @@ def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected
 
 
 # Snippet building
-SNIPPET_CONTEXT_CHARS = 2000
-SNIPPET_MAX_CHARS = 30000
+SNIPPET_CONTEXT_CHARS = 750
+# Per-note snippet cap. Set to the payload budget so note-level truncation is effectively
+# off: a single dense note is never silently truncated mid-signal. The per-patient payload
+# cap below is the single real ceiling.
+SNIPPET_MAX_CHARS = 300000
 # Hard cap on total snippet chars per patient payload. 128k-token models at ~4 chars/token
 # give ~500k input chars; we budget ~300k for snippets to leave room for the system prompt,
 # JSON scaffolding, and output.
 PATIENT_PAYLOAD_MAX_CHARS = 300000
 
 
-def merge_windows(windows, gap_chars=80):
+def merge_windows(windows, gap_chars=300):
     if not windows:
         return []
     ordered = sorted(windows)
@@ -676,46 +705,92 @@ def build_snippet(text, matches, *, context_chars=SNIPPET_CONTEXT_CHARS, max_cha
     return out
 
 
-def build_patient_snippets(
-    notes_df,
-    *,
-    max_notes_per_patient=30,
-    snippet_max_chars=SNIPPET_MAX_CHARS,
-    payload_max_chars=PATIENT_PAYLOAD_MAX_CHARS,
-):
-    """Return {mrn: [{note_date, note_type, trigger_categories, snippet}, ...]}.
+def _scan_note_row(row, *, snippet_max_chars):
+    """Clean, trigger-scan, and snippet a single note row.
 
-    Notes without any trigger hit are dropped. Per patient, notes are ranked by
-    (number of trigger categories, raw trigger count, recency) and kept until either
-    `max_notes_per_patient` or the cumulative `payload_max_chars` budget is hit
-    (whichever comes first), so outlier patients can't exceed the model's context window.
+    Returns a candidate dict (mrn + snippet metadata) or None if the note has no
+    usable text or no trigger hit. Module-level so it can be pickled by a
+    ProcessPoolExecutor worker.
     """
-    if notes_df.is_empty():
+    raw_text = row.get("CLINICAL_TEXT") or ""
+    note_type = row.get("NOTE_TYPE") or "Unknown"
+    cleaned = clean_note(raw_text, note_type=note_type)
+    if not cleaned:
+        return None
+    matches = find_trigger_matches(cleaned)
+    if not matches:
+        return None
+    snippet = build_snippet(cleaned, matches, max_chars=snippet_max_chars)
+    if not snippet:
+        return None
+    return {
+        "mrn": int(row["DFCI_MRN"]),
+        "note_date": to_iso_date(row.get("EVENT_DATE")),
+        "note_type": note_type,
+        "trigger_categories": sorted({m[0] for m in matches}),
+        "trigger_count": len(matches),
+        "snippet": snippet,
+    }
+
+
+def _scan_note_chunk(rows, *, snippet_max_chars):
+    """Scan a list of note rows in one worker call (amortizes IPC overhead)."""
+    out = []
+    for row in rows:
+        candidate = _scan_note_row(row, snippet_max_chars=snippet_max_chars)
+        if candidate is not None:
+            out.append(candidate)
+    return out
+
+
+def _chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def scan_note_candidates(notes_df, *, snippet_max_chars=SNIPPET_MAX_CHARS, max_workers=None):
+    """Clean + trigger-scan + snippet every note, in parallel across processes.
+
+    Returns {mrn: [candidate, ...]}. This is the CPU-heavy startup step; it is
+    embarrassingly parallel across notes, so it is farmed out to a process pool.
+    A worker count of 1 runs inline (useful for small cohorts / debugging).
+    """
+    rows = list(notes_df.iter_rows(named=True))
+    if not rows:
         return {}
 
-    candidates = {}
-    for row in notes_df.iter_rows(named=True):
-        raw_text = row.get("CLINICAL_TEXT") or ""
-        note_type = row.get("NOTE_TYPE") or "Unknown"
-        cleaned = clean_note(raw_text, note_type=note_type)
-        if not cleaned:
-            continue
-        matches = find_trigger_matches(cleaned)
-        if not matches:
-            continue
-        snippet = build_snippet(cleaned, matches, max_chars=snippet_max_chars)
-        if not snippet:
-            continue
-        mrn = int(row["DFCI_MRN"])
-        categories = sorted({m[0] for m in matches})
-        candidates.setdefault(mrn, []).append({
-            "note_date": to_iso_date(row.get("EVENT_DATE")),
-            "note_type": note_type,
-            "trigger_categories": categories,
-            "trigger_count": len(matches),
-            "snippet": snippet,
-        })
+    if max_workers is None:
+        max_workers = os.cpu_count() or 1
+    max_workers = max(1, min(max_workers, len(rows)))
 
+    candidates = {}
+
+    def _collect(results):
+        for c in results:
+            candidates.setdefault(c["mrn"], []).append(c)
+
+    if max_workers == 1:
+        _collect(_scan_note_chunk(rows, snippet_max_chars=snippet_max_chars))
+        return candidates
+
+    # ~4 chunks per worker keeps the pool fed while amortizing per-task pickling.
+    chunk_size = max(1, math.ceil(len(rows) / (max_workers * 4)))
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for results in executor.map(
+            partial(_scan_note_chunk, snippet_max_chars=snippet_max_chars),
+            _chunked(rows, chunk_size),
+        ):
+            _collect(results)
+    return candidates
+
+
+def rank_patient_candidates(candidates, *, max_notes_per_patient, payload_max_chars):
+    """Rank each patient's candidate notes and keep the top slice under budget.
+
+    Ranking: (number of trigger categories, raw trigger count, recency), descending.
+    Kept until either `max_notes_per_patient` or the cumulative `payload_max_chars`
+    budget is hit, so outlier patients can't exceed the model's context window.
+    """
     ranked = {}
     for mrn, items in candidates.items():
         items.sort(
@@ -740,6 +815,92 @@ def build_patient_snippets(
             })
             used_chars += snippet_len
         ranked[mrn] = kept
+    return ranked
+
+
+def _snippet_cache_key(notes_df, *, max_notes_per_patient, snippet_max_chars, payload_max_chars):
+    """Deterministic key over the note content + all params that affect the output.
+
+    Hashes the (mrn, date, type, text) of every note plus the snippet-building
+    params and the trigger-regex source, so any change to inputs or logic misses
+    the cache rather than returning a stale result.
+    """
+    hasher = hashlib.sha256()
+    for name in ("DFCI_MRN", "EVENT_DATE", "NOTE_TYPE", "CLINICAL_TEXT"):
+        if name in notes_df.columns:
+            col = notes_df.get_column(name)
+            hasher.update(name.encode())
+            hasher.update(str(col.hash().sum()).encode())
+    for label, pattern in TRIGGER_REGEX.items():
+        hasher.update(label.encode())
+        hasher.update(pattern.encode())
+    hasher.update(
+        repr((
+            int(notes_df.height),
+            SNIPPET_CONTEXT_CHARS,
+            int(max_notes_per_patient),
+            int(snippet_max_chars),
+            int(payload_max_chars),
+        )).encode()
+    )
+    return hasher.hexdigest()[:16]
+
+
+def build_patient_snippets(
+    notes_df,
+    *,
+    max_notes_per_patient=75,
+    snippet_max_chars=SNIPPET_MAX_CHARS,
+    payload_max_chars=PATIENT_PAYLOAD_MAX_CHARS,
+    max_workers=None,
+    cache_dir=None,
+):
+    """Return {mrn: [{note_date, note_type, trigger_categories, snippet}, ...]}.
+
+    Notes without any trigger hit are dropped. The per-note scan (clean + trigger
+    match + snippet) runs in parallel across processes. Results are ranked per
+    patient and capped by `max_notes_per_patient` / `payload_max_chars`.
+
+    If `cache_dir` is given, the ranked result is cached under a content+params
+    hash so re-runs over the same cohort skip the whole scan.
+    """
+    if notes_df.is_empty():
+        return {}
+
+    cache_path = None
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        key = _snippet_cache_key(
+            notes_df,
+            max_notes_per_patient=max_notes_per_patient,
+            snippet_max_chars=snippet_max_chars,
+            payload_max_chars=payload_max_chars,
+        )
+        cache_path = cache_dir / f"patient_snippets_{key}.json.gz"
+        if cache_path.exists():
+            try:
+                with gzip.open(cache_path, "rt", encoding="utf-8") as handle:
+                    cached = json.load(handle)
+                return {int(mrn): snippets for mrn, snippets in cached.items()}
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass  # corrupt/partial cache — fall through and recompute
+
+    candidates = scan_note_candidates(
+        notes_df, snippet_max_chars=snippet_max_chars, max_workers=max_workers
+    )
+    ranked = rank_patient_candidates(
+        candidates,
+        max_notes_per_patient=max_notes_per_patient,
+        payload_max_chars=payload_max_chars,
+    )
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        with gzip.open(tmp_path, "wt", encoding="utf-8") as handle:
+            json.dump({str(mrn): snippets for mrn, snippets in ranked.items()}, handle)
+        tmp_path.replace(cache_path)  # atomic: never leave a half-written cache
+
     return ranked
 
 

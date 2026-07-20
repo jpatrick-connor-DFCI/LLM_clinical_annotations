@@ -23,6 +23,7 @@ from shared.llm_helpers import (  # noqa: E402
     load_notes,
     load_selected_mrns,
     parse_json_response,
+    resolve_note_source,
 )
 
 
@@ -68,10 +69,21 @@ def parse_args():
     parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--max-workers", type=int, default=8)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-mrns", type=int, default=None)
-    parser.add_argument("--max-notes-per-patient", type=int, default=30)
+    parser.add_argument("--max-notes-per-patient", type=int, default=75)
+    parser.add_argument(
+        "--scan-workers",
+        type=int,
+        default=None,
+        help="Processes for the note clean/trigger/snippet scan (default: all cores).",
+    )
+    parser.add_argument(
+        "--no-snippet-cache",
+        action="store_true",
+        help="Disable the per-cohort snippet cache (forces a full re-scan).",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -198,6 +210,17 @@ def run(args):
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
     bundle_path = args.note_bundle_path
 
+    source_label, source_path = resolve_note_source(
+        csv_path=args.notes_csv, bundle_path=bundle_path
+    )
+    if source_label == "raw_json":
+        print(
+            "Note source: raw OncDRS JSONs (no bundle or CSV found) — this is the "
+            "slowest path; build the CSV/bundle to speed up loading."
+        )
+    else:
+        print(f"Note source: {source_label} ({source_path})")
+
     notes_df = load_notes(
         csv_path=args.notes_csv,
         bundle_path=bundle_path,
@@ -209,8 +232,12 @@ def run(args):
         f"{notes_df['DFCI_MRN'].n_unique()} patients"
     )
 
+    cache_dir = None if args.no_snippet_cache else (args.output_dir / "snippet_cache")
     patient_snippets = build_patient_snippets(
-        notes_df, max_notes_per_patient=args.max_notes_per_patient
+        notes_df,
+        max_notes_per_patient=args.max_notes_per_patient,
+        max_workers=args.scan_workers,
+        cache_dir=cache_dir,
     )
     all_mrns = set(notes_df["DFCI_MRN"].cast(pl.Int64).unique().to_list())
     triggered_mrns = set(patient_snippets.keys())
@@ -226,15 +253,16 @@ def run(args):
         )
     print(f"Already completed: {len(completed)}")
 
-    for mrn in sorted(no_signal_mrns - completed):
-        append_row(output_path, conventional_row(mrn))
-
     mrns_to_run = sorted(triggered_mrns - completed)
     if args.limit_mrns is not None:
         mrns_to_run = mrns_to_run[: args.limit_mrns]
     print(f"Patients to classify with LLM: {len(mrns_to_run)}")
 
+    no_signal_to_write = sorted(no_signal_mrns - completed)
+
     if not mrns_to_run:
+        for mrn in no_signal_to_write:
+            append_row(output_path, conventional_row(mrn))
         print(f"Wrote labels: {output_path}")
         return
 
@@ -246,7 +274,12 @@ def run(args):
         return mrn, snippets, result, error
 
     with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        # Submit all LLM work first so calls are in flight immediately, then write
+        # the no-signal (auto-conventional) rows while the API calls run — the
+        # no-signal write no longer delays time-to-first-call.
         futures = {executor.submit(worker, mrn): mrn for mrn in mrns_to_run}
+        for mrn in no_signal_to_write:
+            append_row(output_path, conventional_row(mrn))
         for future in tqdm(
             as_completed(futures), total=len(futures), desc="Patients", unit="pt"
         ):

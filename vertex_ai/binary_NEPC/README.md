@@ -66,7 +66,7 @@ Set `BINARY_NEPC_OUTPUT_DIR` to override it. The legacy
 
 - `LLM_NEPC_classifier_note_bundle.json.gz` — optional pre-compiled note bundle
 - `LLM_NEPC_classifier_labels.tsv` — one row per patient with the final classification, supporting quotes, confidence, and rationale
-- `LLM_NEPC_classifier_failed_patients.tsv` — appended for any patient whose LLM call errored
+- `LLM_NEPC_classifier_failed_patients.tsv` — current unlabeled patients whose LLM call errored; successful retries are removed
 
 `LLM_NEPC_classifier_labels.tsv` columns:
 
@@ -78,7 +78,7 @@ supporting_quotes, supporting_quote_dates,
 confidence, rationale, num_snippets
 ```
 
-The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_classifier_labels.tsv`. Use `--overwrite` to start fresh.
+The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_classifier_labels.tsv`. Failed patients are retried by a normal resumed run, or use `--retry-failures` to run only patients in the failed-patients TSV. Successful retries are appended to labels and removed from the failed/unlabeled TSV. Use `--overwrite` to start fresh.
 
 ## Useful flags
 
@@ -87,6 +87,7 @@ The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_cl
 --max-workers N              # concurrent patient classifications (default 4)
 --limit-mrns N               # cap how many MRNs to process this run
 --model NAME                 # override the Azure OpenAI deployment (default gpt-4o)
+--retry-failures             # only rerun patients in the failed-patients TSV
 --overwrite                  # delete prior labels/failures and start over
 ```
 

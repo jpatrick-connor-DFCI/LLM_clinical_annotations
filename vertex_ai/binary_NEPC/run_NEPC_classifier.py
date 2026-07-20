@@ -44,6 +44,7 @@ OUTPUT_COLUMNS = [
     "rationale",
     "num_snippets",
 ]
+FAILURE_COLUMNS = ["DFCI_MRN", "error", "num_snippets"]
 
 
 def parse_args():
@@ -72,7 +73,13 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-mrns", type=int, default=None)
     parser.add_argument("--max-notes-per-patient", type=int, default=30)
-    parser.add_argument("--overwrite", action="store_true")
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument("--overwrite", action="store_true")
+    run_mode.add_argument(
+        "--retry-failures",
+        action="store_true",
+        help="Only rerun MRNs currently listed in the failed-patients TSV.",
+    )
     return parser.parse_args()
 
 
@@ -93,9 +100,40 @@ def append_row(path, row):
     _append_tsv_row(path, row, OUTPUT_COLUMNS)
 
 
+def read_mrns(path):
+    """Read the patient identifiers from an existing pipeline TSV."""
+    if not path.exists() or path.stat().st_size == 0:
+        return set()
+    frame = pl.read_csv(path, separator="\t")
+    if "DFCI_MRN" not in frame.columns:
+        raise ValueError(f"Missing DFCI_MRN column in {path}")
+    return set(
+        frame["DFCI_MRN"].cast(pl.Int64, strict=False).drop_nulls().to_list()
+    )
+
+
+def remove_failures(path, mrns):
+    """Remove resolved patients from the failure TSV while preserving its header."""
+    mrns = {int(mrn) for mrn in mrns}
+    if not mrns or not path.exists() or path.stat().st_size == 0:
+        return
+    frame = pl.read_csv(path, separator="\t")
+    if "DFCI_MRN" not in frame.columns:
+        raise ValueError(f"Missing DFCI_MRN column in {path}")
+    remaining = frame.filter(
+        ~pl.col("DFCI_MRN").cast(pl.Int64, strict=False).is_in(sorted(mrns))
+    )
+    if remaining.height == frame.height:
+        return
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    remaining.write_csv(temporary_path, separator="\t")
+    temporary_path.replace(path)
+
+
 def append_failure(path, mrn, error, num_snippets):
     row = {"DFCI_MRN": int(mrn), "error": error, "num_snippets": int(num_snippets)}
-    _append_tsv_row(path, row, list(row.keys()))
+    remove_failures(path, [mrn])
+    _append_tsv_row(path, row, FAILURE_COLUMNS)
 
 
 def classify_patient(client, model, max_retries, mrn, snippets):
@@ -195,7 +233,20 @@ def run(args):
         output_path.unlink(missing_ok=True)
         failures_path.unlink(missing_ok=True)
 
+    completed = read_mrns(output_path)
+    failed = read_mrns(failures_path)
+    remove_failures(failures_path, completed)
+    failed -= completed
+
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
+    if getattr(args, "retry_failures", False):
+        if selected_mrns is not None:
+            failed &= selected_mrns
+        selected_mrns = failed
+        if not selected_mrns:
+            print(f"No failed patients to retry: {failures_path}")
+            return
+        print(f"Retrying failed patients: {len(selected_mrns)}")
     bundle_path = args.note_bundle_path
 
     notes_df = load_notes(
@@ -219,15 +270,12 @@ def run(args):
     print(f"Patients with triggered snippets: {len(triggered_mrns)}")
     print(f"Patients with no signal (auto-conventional): {len(no_signal_mrns)}")
 
-    completed = set()
-    if output_path.exists() and output_path.stat().st_size > 0:
-        completed = set(
-            pl.read_csv(output_path, separator="\t")["DFCI_MRN"].cast(pl.Int64).to_list()
-        )
     print(f"Already completed: {len(completed)}")
 
-    for mrn in sorted(no_signal_mrns - completed):
+    no_signal_to_write = sorted(no_signal_mrns - completed)
+    for mrn in no_signal_to_write:
         append_row(output_path, conventional_row(mrn))
+    remove_failures(failures_path, no_signal_to_write)
 
     mrns_to_run = sorted(triggered_mrns - completed)
     if args.limit_mrns is not None:
@@ -256,6 +304,7 @@ def run(args):
                 append_failure(failures_path, mrn, error or "no_result", len(snippets))
                 continue
             append_row(output_path, make_row(mrn, len(snippets), result))
+            remove_failures(failures_path, [mrn])
 
     print(f"Wrote labels: {output_path}")
 

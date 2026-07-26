@@ -1,43 +1,72 @@
 # LLM clinical annotations
 
-This repository keeps the two provider implementations in separate wrapper
-directories:
+LLM-based extraction of structured clinical annotations (NEPC status, cancer
+stage, Gleason score, AVPC/NEPC criteria timelines) from prostate cancer
+clinical notes, runnable against either DFCI Azure OpenAI or Google Vertex AI
+(Gemini) as the LLM backend.
 
-- [`dfci_gpt/`](dfci_gpt/) — DFCI Azure OpenAI / GPT pipelines.
-- [`vertex_ai/`](vertex_ai/) — Google Vertex AI / Gemini pipelines.
-
-Each wrapper is self-contained and has its own `shared/` modules,
-provider-specific requirements, and task directories:
+## Layout
 
 ```text
-dfci_gpt/
-  binary_NEPC/
-  cancer_stage/
-  gleason_score/
-  longitudinal_NEPC/
-  shared/
-  requirements.txt
+preprocessing/     Provider-agnostic note loading, cleaning, trigger-scanning,
+                    and snippet building. Never imports a provider SDK.
+  cli/              Standalone preprocessing scripts (compile notes, collect
+                    per-task evidence). Run before any LLM calls.
+  bundles/          Snippet-bundle read/write helpers.
 
-vertex_ai/
-  binary_NEPC/
-  cancer_stage/
-  gleason_score/
-  longitudinal_NEPC/
-  shared/
-  requirements.txt
+providers/          Thin adapters over each LLM backend behind one interface
+                    (providers.base.Provider): build_client(), call_with_retry().
+                    Each adapter lazily imports its own SDK only, so selecting
+                    one provider never pulls in the other's dependencies.
+  dfci_gpt.py        DFCI Azure OpenAI adapter.
+  vertex_ai.py       Google Vertex AI (Gemini) adapter, via google-genai.
+
+tasks/              One directory per extraction task, each with a system
+                    prompt and a runner that takes --provider {dfci_gpt,vertex_ai}.
+  binary_NEPC/       NEPC vs. adenocarcinoma classification.
+  cancer_stage/      Cancer stage timeline extraction.
+  gleason_score/     Gleason score / grade group timeline extraction.
+  longitudinal_NEPC/ AVPC (Aparicio criteria) / NEPC feature timeline extraction.
+
+notebooks/          One notebook per task with a PROVIDER toggle. Each notebook
+                    subprocess-calls the preprocessing CLIs, then the task's
+                    runner with --provider set from the toggle.
 ```
 
-Run commands from the selected wrapper directory so imports and relative paths
-resolve against the correct provider implementation:
+Each task follows the same two-phase pattern: a **preprocessing** step (provider-
+independent — scans notes, writes an evidence/snippet artifact) followed by a
+**task runner** (provider-flagged — reads that artifact, makes the LLM calls,
+builds the output timeline/labels).
+
+## Running a task
+
+The easiest entry point is the matching notebook in `notebooks/`: set the
+`PROVIDER` toggle (`"dfci_gpt"` or `"vertex_ai"`), flip on the `RUN_*` cells you
+need, and run top to bottom.
+
+To run from the command line instead:
 
 ```bash
-# DFCI GPT
-cd dfci_gpt
-python binary_NEPC/run_NEPC_classifier.py --help
+# 1. Preprocessing (provider-independent)
+python preprocessing/cli/compile_prostate_notes.py --output-path /path/to/notes.csv
+python preprocessing/cli/compile_patient_snippets.py --output-path /path/to/snippets.json.gz
 
-# Vertex AI
-cd vertex_ai
-python binary_NEPC/run_NEPC_classifier.py --help
+# 2. Task runner (provider-flagged)
+python tasks/binary_NEPC/run_NEPC_classifier.py \
+    --snippets-path /path/to/snippets.json.gz \
+    --provider dfci_gpt   # or vertex_ai
 ```
 
-See the documentation within each wrapper for authentication and configuration.
+Every preprocessing CLI and task runner supports `--help`.
+
+## Setup
+
+```bash
+pip install -e .                    # core deps (preprocessing/, providers/, tasks/)
+pip install -e ".[dfci_gpt]"        # + openai, azure-identity
+pip install -e ".[vertex_ai]"       # + google-genai
+```
+
+`dfci_gpt` authenticates via `DefaultAzureCredential` (Azure AD). `vertex_ai`
+authenticates via Google Application Default Credentials and reads
+`VERTEX_PROJECT` / `VERTEX_LOCATION` from the environment.

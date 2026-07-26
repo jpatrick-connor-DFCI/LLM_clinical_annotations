@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-clinical-annotations"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "polars",
+    "python-dateutil",
+    "numpy",
+    "tqdm",
+    "ijson",
+]
+
+[project.optional-dependencies]
+dfci_gpt = ["openai", "azure-identity"]
+vertex_ai = ["google-genai"]
+
+[tool.setuptools.packages.find]
+include = ["preprocessing*", "providers*", "tasks*"]
+namespaces = true

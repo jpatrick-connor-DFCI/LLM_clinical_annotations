@@ -1,7 +1,0 @@
-polars
-python-dateutil
-numpy
-tqdm
-ijson
-openai
-azure-identity

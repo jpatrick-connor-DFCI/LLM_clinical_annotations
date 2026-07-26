@@ -285,17 +285,34 @@ disagreements, and here gpt itself holds both values.
 Vertex's binary_NEPC sizing changes to match gpt. That is the one real behavior
 change here. Longitudinal sizing is untouched in both trees.
 
+`gap_chars` is **not** part of either profile: grepping every `build_snippet`/
+`merge_windows` call site in both trees shows dfci_gpt's `merge_windows` is only
+ever called from inside `build_snippet`, always at its default (300) — no live
+dfci_gpt path passes another value. vertex_ai forks the same default to 80 and
+applies it uniformly across every vertex task, not per-task (vertex's
+`longitudinal_helpers.py` imports `build_snippet` from vertex's own
+`llm_helpers.py`, same default throughout). So `gap_chars` is a per-*provider*
+constant that happens to be applied uniformly, not a per-task tuning knob —
+it does not belong on `SnippetProfile` alongside the genuinely task-scoped
+`context_chars`/`max_chars`/`payload_max_chars`. It lives as its own top-level
+`SNIPPET_GAP_CHARS = 300` constant in `preprocessing/config.py` (gpt wins → 300),
+and `build_snippet`'s signature is unchanged from the original
+(`context_chars`/`max_chars` keyword args only, no `gap_chars` and no `profile`
+object) — `merge_windows` picks up `SNIPPET_GAP_CHARS` as its own default.
+
 #### Resolution
 
 Named profiles in the shared config, selected explicitly at the call site:
 
 ```python
 # preprocessing/config.py — one shared module, two named profiles
+SNIPPET_GAP_CHARS = 300  # per-provider, not per-task; see above
+
 SNIPPET_PROFILES = {
     "binary_nepc":  SnippetProfile(context_chars=750,  max_chars=300_000,
-                                   gap_chars=300, payload_max_chars=300_000),
+                                   payload_max_chars=300_000),
     "longitudinal": SnippetProfile(context_chars=6000, max_chars=30_000,
-                                   gap_chars=80,  payload_max_chars=60_000),
+                                   payload_max_chars=60_000),
 }
 ```
 

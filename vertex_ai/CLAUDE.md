@@ -2,10 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-This is the **Vertex AI variant** of the LLM clinical annotations pipeline. It is
-structurally identical to the parent `LLM_clinical_annotations/` repo except that the
-LLM client layer in `shared/llm_helpers.py` calls Google Vertex AI (Gemini) instead of
-the DFCI Azure OpenAI endpoint.
+This is the **Vertex AI wrapper** of the LLM clinical annotations pipeline. It is
+structurally parallel to the sibling `dfci_gpt/` wrapper except that the LLM
+client layer in `shared/llm_helpers.py` calls Google Vertex AI (Gemini) instead
+of the DFCI Azure OpenAI endpoint.
 
 ## Setup
 
@@ -22,8 +22,9 @@ No API key is needed. Auth is handled by Application Default Credentials (ADC).
 # Build the shared note source (required before most LLM pipelines)
 python shared/compile_prostate_notes.py --derive-prostate-mrns
 
-# Binary NEPC classifier
-python binary_NEPC/run_NEPC_classifier.py --mrn-file /path/to/mrns.txt --output-dir /path/to/out
+# Binary NEPC pipeline: compile snippets, then classify the saved artifact
+python binary_NEPC/compile_patient_snippets.py --mrn-file /path/to/mrns.txt --output-path /path/to/out/patient_snippets.json.gz
+python binary_NEPC/run_NEPC_classifier.py --mrn-file /path/to/mrns.txt --snippets-path /path/to/out/patient_snippets.json.gz --output-dir /path/to/out
 
 # Cancer stage extraction (two-step)
 python cancer_stage/extract_stage_notes.py --output-dir /path/to/out   # Step 1: scan
@@ -53,15 +54,14 @@ so no install step is needed beyond `pip install -r requirements.txt`.
 
 Only `shared/llm_helpers.py` differs from the parent repo:
 
-- **`build_client()`** calls `vertexai.init(project, location)` and returns `None`
-  (Gemini models are stateless; `GenerativeModel` is instantiated per call).
+- **`build_client()`** returns a Google Gen AI SDK client configured for Vertex AI
+  with the selected project and location.
 - **`call_with_retry()`** maps the OpenAI-style `messages` list to Gemini's
-  `system_instruction` + `generate_content()` pattern. Uses
+  `system_instruction` + `client.models.generate_content()` pattern. Uses
   `response_mime_type="application/json"` for constrained JSON output.
-  Error handling maps GCP exceptions (`ResourceExhausted`, `DeadlineExceeded`,
-  `GoogleAPIError`) to the same retry logic the Azure version used for rate limits,
-  timeouts, and API errors.
-- Imports: `google-cloud-aiplatform` replaces `openai` + `azure-identity`.
+  Error handling maps Google Gen AI API status codes to the same retry logic the
+  Azure version uses for rate limits, timeouts, and API errors.
+- Dependency: `google-genai` replaces `openai` + `azure-identity`.
 
 Everything else — note loading, trigger regexes, snippet building, prompts, pipeline
 orchestration, output formats — is identical to the Azure version.

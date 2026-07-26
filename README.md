@@ -1,47 +1,43 @@
-# LLM_clinical_annotations
+# LLM clinical annotations
 
-This repo contains clinical-note annotation pipelines that use LLMs and related
-note-preparation utilities.
+This repository keeps the two provider implementations in separate wrapper
+directories:
 
-## Layout
+- [`dfci_gpt/`](dfci_gpt/) — DFCI Azure OpenAI / GPT pipelines.
+- [`vertex_ai/`](vertex_ai/) — Google Vertex AI / Gemini pipelines.
 
-- `shared/` - common note cleaning, note loading, snippet packing, Azure OpenAI
-  calls, JSON parsing, and shared preprocessing scripts.
-- `cancer_stage/` - cancer stage note extraction.
-- `binary_NEPC/` - patient-level NEPC / AVPC / biomarker / conventional
-  classifier.
-- `longitudinal_NEPC/` - AVPC / NEPC criteria onset timeline extraction.
-- `gleason_score/` - Gleason / Grade Group timeline extraction.
-
-## Common Data Source
-
-Most downstream applications read the shared `prostate_text_data.csv` note
-source. Build it with:
-
-```bash
-python shared/compile_prostate_notes.py
-```
-
-By default, that command reads raw OncDRS notes and derives the cohort from
-the `DFCI_MRN` column in
-`/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/prostate_arpi_survival_cohort.csv`.
-
-The default data root is `/data/gusev/USERS/jpconnor/data/LLM_annotations/`.
-Override it with `LLM_ANNOTATIONS_DATA_PATH`; the legacy `CAIA_COMPASS_DATA_PATH`
-is still accepted as a fallback.
-
-## LLM Configuration
-
-LLM applications use Azure OpenAI AAD authentication via
-`DefaultAzureCredential`. Common overrides:
+Each wrapper is self-contained and has its own `shared/` modules,
+provider-specific requirements, and task directories:
 
 ```text
-LLM_ANNOTATIONS_DATA_PATH
-BINARY_NEPC_OUTPUT_DIR
-CAIA_AZURE_OPENAI_ENDPOINT
-CAIA_AZURE_OPENAI_API_VERSION
-CAIA_AZURE_OPENAI_MODEL
+dfci_gpt/
+  binary_NEPC/
+  cancer_stage/
+  gleason_score/
+  longitudinal_NEPC/
+  shared/
+  requirements.txt
+
+vertex_ai/
+  binary_NEPC/
+  cancer_stage/
+  gleason_score/
+  longitudinal_NEPC/
+  shared/
+  requirements.txt
 ```
 
-The old `CAIA_COMPASS_*` data/output environment variables are still honored for
-compatibility.
+Run commands from the selected wrapper directory so imports and relative paths
+resolve against the correct provider implementation:
+
+```bash
+# DFCI GPT
+cd dfci_gpt
+python binary_NEPC/run_NEPC_classifier.py --help
+
+# Vertex AI
+cd vertex_ai
+python binary_NEPC/run_NEPC_classifier.py --help
+```
+
+See the documentation within each wrapper for authentication and configuration.

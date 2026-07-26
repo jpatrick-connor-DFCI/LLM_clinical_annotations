@@ -15,17 +15,16 @@ except ImportError:
     ijson = None
 
 try:
-    import google.api_core.exceptions as gcp_exceptions
-    import vertexai
-    from vertexai.generative_models import GenerationConfig, GenerativeModel
+    from google import genai
+    from google.genai import errors as genai_errors
+    from google.genai import types as genai_types
 
-    VERTEX_IMPORT_ERROR = None
+    GENAI_IMPORT_ERROR = None
 except ImportError as error:
-    gcp_exceptions = None
-    vertexai = None
-    GenerativeModel = None
-    GenerationConfig = None
-    VERTEX_IMPORT_ERROR = error
+    genai = None
+    genai_errors = None
+    genai_types = None
+    GENAI_IMPORT_ERROR = error
 
 
 from shared.utils import clean_note  # noqa: E402
@@ -736,45 +735,59 @@ def build_patient_snippets(
 
 # LLM client — Vertex AI
 def build_client():
-    if VERTEX_IMPORT_ERROR is not None:
+    if GENAI_IMPORT_ERROR is not None:
         raise ImportError(
-            "Vertex AI note extraction requires google-cloud-aiplatform in the active environment."
-        ) from VERTEX_IMPORT_ERROR
-    vertexai.init(project=VERTEX_PROJECT, location=VERTEX_LOCATION)
-    # GenerativeModel is instantiated per call; return None as a sentinel so call sites
-    # that pass `client` as the first arg to call_with_retry still work unchanged.
-    return None
+            "Vertex AI note extraction requires google-genai in the active environment."
+        ) from GENAI_IMPORT_ERROR
+    return genai.Client(
+        vertexai=True,
+        project=VERTEX_PROJECT,
+        location=VERTEX_LOCATION,
+    )
 
 
-def call_with_retry(client, model_name, messages, max_retries=3):  # noqa: ARG001 (client unused)
+def call_with_retry(client, model_name, messages, max_retries=3):
     system_parts = [m["content"] for m in messages if m["role"] == "system"]
     user_parts = [m["content"] for m in messages if m["role"] == "user"]
     system_instruction = "\n\n".join(system_parts) if system_parts else None
 
-    model = GenerativeModel(model_name, system_instruction=system_instruction)
-    generation_config = GenerationConfig(temperature=0, response_mime_type="application/json")
+    generation_config = genai_types.GenerateContentConfig(
+        temperature=0,
+        response_mime_type="application/json",
+        system_instruction=system_instruction,
+    )
 
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(
-                "\n\n".join(user_parts),
-                generation_config=generation_config,
+            response = client.models.generate_content(
+                model=model_name,
+                contents="\n\n".join(user_parts),
+                config=generation_config,
             )
             candidate = response.candidates[0]
-            finish_name = candidate.finish_reason.name
+            finish_reason = candidate.finish_reason
+            finish_name = getattr(finish_reason, "value", str(finish_reason))
             if finish_name in ("SAFETY", "RECITATION", "BLOCKLIST"):
                 return None, "content_filter_response"
-            text = candidate.content.parts[0].text.strip()
+            if response.text is None:
+                return None, f"empty_response: finish_reason={finish_name}"
+            text = response.text.strip()
             return text, None
-        except gcp_exceptions.ResourceExhausted:
-            time.sleep(2 ** attempt * 5)
-        except gcp_exceptions.DeadlineExceeded:
-            time.sleep(2 ** attempt * 3)
-        except gcp_exceptions.GoogleAPIError as error:
+        except genai_errors.APIError as error:
             body = str(error)
+            status_code = getattr(error, "code", None)
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
+                if status_code == 429:
+                    time.sleep(2 ** attempt * 5)
+                elif status_code in (408, 504):
+                    time.sleep(2 ** attempt * 3)
+                else:
+                    time.sleep(2 ** attempt)
                 continue
+            if status_code == 429:
+                return None, f"resource_exhausted: {body[:200]}"
+            if status_code in (408, 504):
+                return None, f"deadline_exceeded: {body[:200]}"
             return None, f"api_error: {body[:200]}"
         except Exception as error:  # noqa: BLE001
             return None, f"unexpected: {type(error).__name__}: {str(error)[:200]}"

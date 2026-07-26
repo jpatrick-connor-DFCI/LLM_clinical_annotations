@@ -16,14 +16,14 @@ from shared.llm_helpers import (  # noqa: E402
     CLINICAL_SAFETY_CONTEXT,
     DEFAULT_MODEL_NAME,
     DEFAULT_OUTPUT_DIR,
-    PROSTATE_TEXT_CSV,
     build_client,
-    build_patient_snippets,
     call_with_retry,
-    load_notes,
     load_selected_mrns,
     parse_json_response,
-    resolve_note_source,
+)
+from binary_NEPC.snippet_bundle import (  # noqa: E402
+    SNIPPET_BUNDLE_FILENAME,
+    load_snippet_bundle,
 )
 
 
@@ -55,36 +55,19 @@ def parse_args():
     parser.add_argument("--mrn-file", type=Path, default=None)
     parser.add_argument("--mrns", default=None)
     parser.add_argument(
-        "--notes-csv",
+        "--snippets-path",
         type=Path,
-        default=PROSTATE_TEXT_CSV,
-        help="Compiled prostate notes CSV (default note source).",
+        default=DEFAULT_OUTPUT_DIR / SNIPPET_BUNDLE_FILENAME,
+        help=(
+            "Patient snippet bundle produced by compile_patient_snippets.py. "
+            "The classifier never reads or scans raw notes."
+        ),
     )
-    parser.add_argument(
-        "--note-bundle-path",
-        type=Path,
-        default=None,
-        help="Optional gzipped note bundle. Overrides the CSV when it exists; "
-        "falls back to raw OncDRS JSONs if neither is present.",
-    )
-    parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-mrns", type=int, default=None)
-    parser.add_argument("--max-notes-per-patient", type=int, default=75)
-    parser.add_argument(
-        "--scan-workers",
-        type=int,
-        default=None,
-        help="Processes for the note clean/trigger/snippet scan (default: all cores).",
-    )
-    parser.add_argument(
-        "--no-snippet-cache",
-        action="store_true",
-        help="Disable the per-cohort snippet cache (forces a full re-scan).",
-    )
     run_mode = parser.add_mutually_exclusive_group()
     run_mode.add_argument("--overwrite", action="store_true")
     run_mode.add_argument(
@@ -262,38 +245,20 @@ def run(args):
             print(f"No failed patients to retry: {failures_path}")
             return
         print(f"Retrying failed patients: {len(selected_mrns)}")
-    bundle_path = args.note_bundle_path
 
-    source_label, source_path = resolve_note_source(
-        csv_path=args.notes_csv, bundle_path=bundle_path
-    )
-    if source_label == "raw_json":
-        print(
-            "Note source: raw OncDRS JSONs (no bundle or CSV found) — this is the "
-            "slowest path; build the CSV/bundle to speed up loading."
-        )
-    else:
-        print(f"Note source: {source_label} ({source_path})")
-
-    notes_df = load_notes(
-        csv_path=args.notes_csv,
-        bundle_path=bundle_path,
-        raw_text_paths=args.raw_text_path,
+    all_mrns, patient_snippets, snippet_metadata = load_snippet_bundle(
+        args.snippets_path,
         selected_mrns=selected_mrns,
     )
-    print(
-        f"Loaded notes: {len(notes_df)} rows for "
-        f"{notes_df['DFCI_MRN'].n_unique()} patients"
-    )
+    if selected_mrns is not None and not all_mrns:
+        raise ValueError(
+            f"None of the selected MRNs are present in {args.snippets_path}"
+        )
+    print(f"Loaded patient snippets: {args.snippets_path}")
+    print(f"Snippet cohort patients: {len(all_mrns)}")
+    if snippet_metadata:
+        print(f"Snippet compilation metadata: {json.dumps(snippet_metadata)}")
 
-    cache_dir = None if args.no_snippet_cache else (args.output_dir / "snippet_cache")
-    patient_snippets = build_patient_snippets(
-        notes_df,
-        max_notes_per_patient=args.max_notes_per_patient,
-        max_workers=args.scan_workers,
-        cache_dir=cache_dir,
-    )
-    all_mrns = set(notes_df["DFCI_MRN"].cast(pl.Int64).unique().to_list())
     triggered_mrns = set(patient_snippets.keys())
     no_signal_mrns = all_mrns - triggered_mrns
 

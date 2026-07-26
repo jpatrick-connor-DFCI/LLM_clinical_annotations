@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with
+the DFCI Azure OpenAI / GPT wrapper. Run the commands below from this
+`dfci_gpt/` directory.
 
 ## Commands
 
@@ -11,8 +13,9 @@ pip install -r requirements.txt
 # Build the shared note source (required before most pipelines)
 python shared/compile_prostate_notes.py --derive-prostate-mrns
 
-# Binary NEPC classifier
-python binary_NEPC/run_NEPC_classifier.py --mrn-file /path/to/mrns.txt --output-dir /path/to/out
+# Binary NEPC pipeline: compile snippets, then classify the saved artifact
+python binary_NEPC/compile_patient_snippets.py --mrn-file /path/to/mrns.txt --output-path /path/to/out/patient_snippets.json.gz
+python binary_NEPC/run_NEPC_classifier.py --mrn-file /path/to/mrns.txt --snippets-path /path/to/out/patient_snippets.json.gz --output-dir /path/to/out
 
 # Cancer stage extraction (two-step)
 python cancer_stage/extract_stage_notes.py --output-dir /path/to/out   # Step 1: scan

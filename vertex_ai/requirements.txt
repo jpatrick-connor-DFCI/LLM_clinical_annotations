@@ -2,4 +2,4 @@ pandas
 numpy
 tqdm
 ijson
-google-cloud-aiplatform>=1.60
+google-genai

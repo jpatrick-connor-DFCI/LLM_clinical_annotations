@@ -23,7 +23,9 @@ AVPC C-criteria refinements:
 
 ```text
 binary_NEPC/
-  run_NEPC_classifier.py           # main entrypoint
+  compile_patient_snippets.py      # required stage 1: save ranked trigger snippets
+  snippet_bundle.py                # versioned snippet artifact I/O
+  run_NEPC_classifier.py           # stage 2: classify the saved snippets
   compile_prostate_note_bundle.py  # optional: pre-compile raw OncDRS notes into a gzip bundle
 shared/
   llm_helpers.py                   # config, triggers, prompt, snippet builder, LLM client
@@ -32,31 +34,34 @@ shared/
 
 ## How it works
 
-1. Load notes for the requested MRNs (from a pre-compiled gzip bundle if present, otherwise raw OncDRS JSONs).
-2. Per note, scan for any of the combined NEPC + AVPC + biomarker trigger regexes and build a snippet window around the matches.
-3. Per patient, rank triggered notes by `(# trigger categories, # triggers, recency)` and keep the top N (default 30).
-4. Send all selected snippets to the LLM in a single call. The model returns the patient's primary label, per-category booleans, supporting quotes, and a rationale.
-5. Patients with no triggered notes are written out as `conventional` without an LLM call.
+1. `compile_patient_snippets.py` loads the selected notes, trigger-scans them,
+   ranks the matches per patient, and saves
+   `LLM_NEPC_classifier_patient_snippets.json.gz`.
+2. The saved artifact contains both the triggered snippets and the complete
+   cohort MRN list, including patients with no triggers.
+3. `run_NEPC_classifier.py` reads only that artifact. It sends triggered
+   patients to the LLM and labels no-trigger patients as `conventional`.
+
+The classifier does not load, clean, or scan source notes. Rebuild the snippet
+artifact explicitly whenever the cohort, notes, triggers, or snippet settings
+change.
 
 ## Recommended run
 
 ```bash
-# (one-time) compile a gzip note bundle so re-runs don't re-scan raw OncDRS JSON
-python binary_NEPC/compile_prostate_note_bundle.py --mrn-file path/to/prostate_mrns.txt
+# Stage 1: compile and save patient snippets
+python binary_NEPC/compile_patient_snippets.py \
+  --mrn-file path/to/prostate_mrns.txt
 
-# classify
-python binary_NEPC/run_NEPC_classifier.py --mrn-file path/to/prostate_mrns.txt --max-workers 4
+# Stage 2: classify only from the saved snippets
+python binary_NEPC/run_NEPC_classifier.py \
+  --mrn-file path/to/prostate_mrns.txt \
+  --max-workers 4
 ```
 
-If the bundle lives elsewhere: `--note-bundle-path path/to/LLM_NEPC_classifier_note_bundle.json.gz`.
-
-## One-command raw run
-
-```bash
-python binary_NEPC/run_NEPC_classifier.py --mrn-file path/to/mrns.txt --max-workers 4
-```
-
-When no bundle exists at the expected path, the pipeline falls back to scanning raw OncDRS JSONs directly.
+Use `--output-path` in stage 1 and the matching `--snippets-path` in stage 2
+when the snippet artifact lives outside the default output directory. The
+optional raw-note bundle remains an input optimization for stage 1 only.
 
 ## Outputs
 
@@ -65,6 +70,7 @@ Set `BINARY_NEPC_OUTPUT_DIR` to override it. The legacy
 `CAIA_COMPASS_NEPC_CLASSIFIER_OUTPUT_DIR` is also accepted.
 
 - `LLM_NEPC_classifier_note_bundle.json.gz` — optional pre-compiled note bundle
+- `LLM_NEPC_classifier_patient_snippets.json.gz` — required saved snippet artifact
 - `LLM_NEPC_classifier_labels.tsv` — one row per patient with the final classification, supporting quotes, confidence, and rationale
 - `LLM_NEPC_classifier_failed_patients.tsv` — current unlabeled patients whose LLM call errored; successful retries are removed
 
@@ -83,7 +89,14 @@ The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_cl
 ## Useful flags
 
 ```text
---max-notes-per-patient N    # cap selected snippets per patient (default 30)
+compile_patient_snippets.py:
+--max-notes-per-patient N    # cap selected snippets per patient (default 75)
+--scan-workers N             # parallel note-scan processes
+--output-path PATH           # saved snippet artifact
+--overwrite                  # explicitly rebuild an existing artifact
+
+run_NEPC_classifier.py:
+--snippets-path PATH         # required precompiled snippet artifact
 --max-workers N              # concurrent patient classifications (default 4)
 --limit-mrns N               # cap how many MRNs to process this run
 --model NAME                 # override the Azure OpenAI deployment (default gpt-4o)
@@ -93,6 +106,7 @@ The pipeline is resumable: re-running skips MRNs already present in `LLM_NEPC_cl
 
 ## Notes
 
-- All triggers are matched on `clean_note`-cleaned text. Each note's snippet is capped at ~30000 chars; per-patient snippet counts are capped (default 30), so a single LLM call typically sees a larger focused context while still staying under the patient payload cap.
+- All triggers are matched on `clean_note`-cleaned text during snippet
+  compilation. The classifier preserves and reports the saved snippet count.
 - No structured labs, genomics tables, medication tables, or PSA tables are used in this classifier — all signal comes from note text.
 - `cisplatin` and `carboplatin` are no longer used as triggers; biomarker selection is driven by the molecular terms above.

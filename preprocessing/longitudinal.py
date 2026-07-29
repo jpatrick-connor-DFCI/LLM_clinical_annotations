@@ -7,6 +7,7 @@ snippets into one or more payload-sized chunks for a single LLM call per chunk.
 """
 
 import hashlib
+import json
 import math
 import re
 
@@ -217,6 +218,75 @@ def group_patient_snippets(
             chunks.append(current)
         patient_chunks[mrn] = chunks
     return patient_chunks
+
+
+def evidence_scan_config_key(
+    notes_df,
+    trigger_regex,
+    *,
+    context_chars,
+    snippet_max_chars,
+    payload_max_chars,
+    note_types=None,
+):
+    """Fingerprint every RESOLVED setting that determines evidence-TSV chunk assignment.
+
+    Modeled on `_snippet_cache_key` in `preprocessing/snippets.py`: hashes the
+    (mrn, date, type, text) content of every note plus every parameter that
+    changes snippet extraction, packing, or chunk assignment, so any drift
+    between two collector runs is caught rather than silently producing
+    mismatched `chunk_index` values. Callers must pass the values actually
+    used (e.g. the CLI's resolved `--context-chars`, not a profile default) —
+    the whole point is to catch exactly the case where the *effective* config
+    changed even though a caller forgot to pass something explicitly.
+
+    `note_types` is the note-type filter applied to `notes_df` before scanning
+    (or None/empty for "all types"); it's included because it changes which
+    notes are eligible even though it doesn't change any numeric knob.
+    """
+    hasher = hashlib.sha256()
+    for name in ("DFCI_MRN", "EVENT_DATE", "NOTE_TYPE", "CLINICAL_TEXT"):
+        if name in notes_df.columns:
+            col = notes_df.get_column(name)
+            hasher.update(name.encode())
+            hasher.update(str(col.hash().sum()).encode())
+    for label in sorted(trigger_regex):
+        hasher.update(label.encode())
+        hasher.update(trigger_regex[label].encode())
+    normalized_note_types = sorted(str(t).strip().lower() for t in note_types) if note_types else []
+    hasher.update(
+        repr((
+            int(notes_df.height),
+            int(context_chars),
+            int(snippet_max_chars),
+            int(payload_max_chars),
+            normalized_note_types,
+        )).encode()
+    )
+    return hasher.hexdigest()[:16]
+
+
+def write_scan_config_meta(meta_path, scan_config, **extra):
+    """Write the sidecar recording the scan_config hash an evidence TSV was built under.
+
+    `extra` fields (e.g. context_chars, payload_max_chars) are informational
+    only — never read back for comparison, so they can't create a second,
+    inconsistent notion of "changed". Only `scan_config` is authoritative.
+    """
+    payload = {"scan_config": scan_config, **extra}
+    tmp_path = meta_path.with_name(f".{meta_path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path.replace(meta_path)
+
+
+def read_scan_config_meta(meta_path):
+    """Read an evidence meta sidecar; return None if it doesn't exist (legacy evidence)."""
+    if not meta_path.exists():
+        return None
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def derive_grade_group(primary, secondary):

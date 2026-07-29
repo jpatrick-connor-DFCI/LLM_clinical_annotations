@@ -26,6 +26,11 @@ python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out -
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
 python tasks/longitudinal_NEPC/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
+# The two longitudinal collectors cache their evidence: re-running with the same
+# scan settings reuses it, changed settings raise until you pass --overwrite.
+python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
+python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --context-chars 4000 --overwrite
+
 # Pilot / subset run (most task runners support these)
 python tasks/cancer_stage/run_stage_extraction.py --mrns "12345,67890" --provider dfci_gpt
 ```
@@ -77,15 +82,32 @@ Every task is split into a **preprocessing** step and a **task runner**:
    trigger matching across notes, context-window extraction, writes an
    evidence/snippet artifact (TSV or `.json.gz` bundle). `compile_patient_snippets.py`
    and `collect_gleason_notes.py`/`collect_nepc_notes.py` use
-   `ProcessPoolExecutor` for the per-note scan; `extract_stage_notes.py`
-   additionally parallelizes over raw files and resumes (skips
-   already-scanned files) when re-run without `--overwrite`.
+   `ProcessPoolExecutor` for the per-note scan (`--scan-workers`, default
+   `os.cpu_count()`); dedup and chunk packing stay single-process because dedup
+   must see the whole cohort. `extract_stage_notes.py` additionally parallelizes
+   over raw files and resumes (skips already-scanned files) when re-run without
+   `--overwrite`.
+
+   The two longitudinal collectors write a `*_evidence.meta.json` sidecar
+   recording a hash of the resolved scan settings. Re-running with unchanged
+   settings reuses the existing evidence and skips the scan; changed settings
+   raise rather than silently mixing incompatible evidence, so `--overwrite` is
+   required to rescan.
 2. **Task runner** (`tasks/<task>/`) — reads the evidence artifact, groups
    snippets into per-patient chunks (greedy packing up to `payload_max_chars`),
    calls the selected provider once per chunk via `ThreadPoolExecutor`, writes
-   raw findings + a processed-patient log incrementally (resumable; re-run
-   without `--overwrite` skips already-processed patients). `run_NEPC_classifier.py`
-   additionally supports `--retry-failures` to retry only prior failures.
+   raw findings + a processed-patient log incrementally. `run_NEPC_classifier.py`
+   resumes at **patient** granularity and supports `--retry-failures` to retry
+   only prior failures.
+
+   The two longitudinal timeline builders resume at **chunk** granularity via
+   `avpc_nepc_processed_chunks.tsv` / `gleason_processed_chunks.tsv`: a patient
+   whose chunk 2 failed re-runs only chunk 2, keeping the findings the other
+   chunks already produced, and per-patient status is derived as
+   `ok` / `partial:N/M` / `failed:<err>`. Because `chunk_index` is the resume
+   key, each chunk row records the evidence `scan_config` hash it was built
+   under; a mismatch against the evidence sidecar raises instead of resuming
+   onto chunks that no longer mean the same thing.
 
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.

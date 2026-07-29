@@ -9,9 +9,23 @@ set of criteria to that date.
 
 Outputs (under <output-dir>):
   avpc_nepc_extractions_raw.tsv   per-finding extractions (provenance, pre-aggregation)
-  avpc_nepc_processed_chunks.tsv  per-chunk log — the unit of resume
+  avpc_nepc_processed_chunks.tsv  per-chunk log — the unit of resume. Each row
+                                   also records the evidence scan_config hash
+                                   (read from avpc_nepc_evidence.meta.json) it
+                                   was produced under, so a regenerated evidence
+                                   file with different scan params can't silently
+                                   "resume" onto now-mismatched chunk indices.
   avpc_nepc_processed_patients.tsv  processed-patient log (derived per-patient status)
   avpc_nepc_timeline.tsv          one row per newly-added criterion (with cumulative set)
+
+Evidence-hash guard: if avpc_nepc_evidence.meta.json exists (written by
+collect_nepc_notes.py) and its scan_config disagrees with the value already
+recorded in avpc_nepc_processed_chunks.tsv, this raises rather than resuming —
+the evidence was regenerated with different scan parameters, so old chunk
+indices no longer mean the same thing. Restore the matching evidence file or
+re-run with --overwrite to discard the stale chunk log. If no meta sidecar
+exists (evidence generated before this check), this warns and proceeds, since
+older evidence on disk has no recorded hash to compare against.
 
 Usage:
   # Run collection first:
@@ -37,7 +51,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import CLINICAL_SAFETY_CONTEXT, DEFAULT_DATA_PATH  # noqa: E402
-from preprocessing.longitudinal import flatten_ws, resolve_date  # noqa: E402
+from preprocessing.longitudinal import flatten_ws, read_scan_config_meta, resolve_date  # noqa: E402
 from preprocessing.notes import load_selected_mrns  # noqa: E402
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
@@ -106,8 +120,11 @@ PROCESSED_COLUMNS = [
 ]
 
 # Per-chunk log: the unit of resume. A chunk that failed is retried on the next
-# run without re-calling the chunks that already succeeded.
-CHUNK_COLUMNS = ["DFCI_MRN", "chunk_index", "num_criteria", "status"]
+# run without re-calling the chunks that already succeeded. scan_config records
+# the evidence hash (from avpc_nepc_evidence.meta.json) each row's chunk_index
+# was assigned under, so a regenerated evidence file with different scan params
+# can be detected before "resuming" onto now-mismatched chunks.
+CHUNK_COLUMNS = ["DFCI_MRN", "chunk_index", "num_criteria", "status", "scan_config"]
 
 
 def parse_args():
@@ -172,6 +189,73 @@ def read_done_chunks(path):
             continue
         done.add((int(mrn), int(idx)))
     return done
+
+
+def check_scan_config(chunk_log_path, meta_path):
+    """Guard chunk-index resume against a regenerated evidence file.
+
+    Compares the scan_config hash recorded in the existing chunk log (if any)
+    against the hash recorded in the evidence meta sidecar (if any):
+
+    - Both present, mismatched -> raise. The evidence was regenerated with
+      different scan parameters, so old chunk_index values in the log no
+      longer correspond to the same snippets; resuming would silently extract
+      the wrong text. Restore the matching evidence file, or re-run with
+      --overwrite to discard the stale chunk log and start clean.
+    - No meta sidecar (evidence predates this check) -> warn and proceed. This
+      is the legacy path: there is nothing to validate against, so it is not
+      treated as an error.
+    - No existing chunk log (first run for this output dir) -> nothing to
+      check.
+
+    Returns the current scan_config to record on new chunk-log rows (or None
+    if there is no meta sidecar to record).
+    """
+    meta = read_scan_config_meta(meta_path)
+    current_config = meta.get("scan_config") if meta else None
+
+    if not chunk_log_path.exists() or chunk_log_path.stat().st_size == 0:
+        if current_config is None:
+            print(
+                f"Warning: no scan-config sidecar found at {meta_path} "
+                "(evidence predates scan-config tracking); proceeding without "
+                "a hash guard."
+            )
+        return current_config
+
+    log = pl.read_csv(
+        chunk_log_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
+    )
+    if "scan_config" not in log.columns:
+        print(
+            f"Warning: {chunk_log_path} predates scan-config tracking; proceeding "
+            "without a hash guard. Re-run with --overwrite if you suspect the "
+            "evidence file has changed since this chunk log was built."
+        )
+        return current_config
+
+    recorded_configs = set(log["scan_config"].drop_nulls().cast(pl.Utf8).to_list())
+    if not recorded_configs:
+        return current_config
+
+    if current_config is None:
+        print(
+            f"Warning: no scan-config sidecar found at {meta_path}, but the "
+            f"existing chunk log at {chunk_log_path} was built under a recorded "
+            "hash. Proceeding without a hash guard — restore the evidence meta "
+            "sidecar if you want this checked."
+        )
+        return current_config
+
+    if recorded_configs != {current_config}:
+        raise ValueError(
+            "Evidence scan settings differ from the existing chunk log "
+            f"({sorted(recorded_configs)} != [{current_config}]). chunk_index "
+            "values in the existing log no longer match this evidence file. "
+            "Restore the matching evidence file, or re-run with --overwrite "
+            "to discard the stale chunk log and reprocess from scratch."
+        )
+    return current_config
 
 
 def compact_log(path, columns, key_columns):
@@ -461,6 +545,7 @@ def build_timeline(raw_path, timeline_path):
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = args.evidence_path or (args.output_dir / "avpc_nepc_evidence.tsv")
+    meta_path = args.output_dir / "avpc_nepc_evidence.meta.json"
     raw_path = args.output_dir / "avpc_nepc_extractions_raw.tsv"
     chunk_log_path = args.output_dir / "avpc_nepc_processed_chunks.tsv"
     processed_path = args.output_dir / "avpc_nepc_processed_patients.tsv"
@@ -475,6 +560,12 @@ def run(args):
     if args.overwrite:
         for path in (raw_path, chunk_log_path, processed_path, timeline_path):
             path.unlink(missing_ok=True)
+
+    # Must run BEFORE read_done_chunks: raises if the evidence file was
+    # regenerated with different scan params than the existing chunk log was
+    # built under (chunk_index would then mean something different), warns and
+    # proceeds if the evidence predates scan-config tracking (legacy data).
+    scan_config = check_scan_config(chunk_log_path, meta_path)
 
     evidence_df = pl.read_csv(evidence_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
     evidence_df = evidence_df.with_columns(
@@ -585,7 +676,7 @@ def run(args):
                 append_rows(raw_path, rows, RAW_COLUMNS)
                 append_rows(
                     chunk_log_path,
-                    [{"DFCI_MRN": int(mrn), **r} for r in chunk_results],
+                    [{"DFCI_MRN": int(mrn), "scan_config": scan_config, **r} for r in chunk_results],
                     CHUNK_COLUMNS,
                 )
                 n_total = len(patient_chunks[mrn])

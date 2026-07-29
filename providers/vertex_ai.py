@@ -44,6 +44,10 @@ def call_with_retry(client, model_name, messages, max_retries=3):
         temperature=0,
         response_mime_type="application/json",
         system_instruction=system_instruction,
+        # Gemini Flash's real ceiling is 8192; request it explicitly so a
+        # truncated response fails fast via finish_reason=MAX_TOKENS below
+        # rather than silently defaulting to a smaller cap.
+        max_output_tokens=8192,
     )
 
     for attempt in range(max_retries):
@@ -58,6 +62,8 @@ def call_with_retry(client, model_name, messages, max_retries=3):
             finish_name = getattr(finish_reason, "value", str(finish_reason))
             if finish_name in ("SAFETY", "RECITATION", "BLOCKLIST"):
                 return None, "content_filter_response"
+            if finish_name == "MAX_TOKENS":
+                return None, "truncated_response: finish_reason=MAX_TOKENS"
             if response.text is None:
                 return None, f"empty_response: finish_reason={finish_name}"
             text = response.text.strip()

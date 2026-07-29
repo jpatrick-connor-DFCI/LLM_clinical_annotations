@@ -89,6 +89,12 @@ Each snippet was selected because it contains language relevant to one of:
 - Quotes must be verbatim. Prefer substantive quotes that preserve surrounding clinical
   context (roughly 40–120 words each). Include the sentence(s) on either side of the
   key finding when they clarify specimen source, timing, or diagnostic certainty.
+- Output length is constrained: return AT MOST 8 supporting quotes total, choosing the
+  most decisive/earliest evidence for each distinct finding (primary bucket, each AVPC
+  criterion, each biomarker, each non-prostate primary). Do not include one quote per
+  matching snippet — many snippets can restate the same finding, and only the strongest
+  representative quote for each distinct finding is needed. Never truncate a quote
+  mid-sentence to fit more in; drop lower-priority quotes instead.
 - For `has_non_prostate_primary`: only set true when the chart documents the patient
   currently has or previously had a non-prostate primary cancer. Do NOT count family
   history, differential-diagnosis mentions, ruled-out workup, or "no history of other

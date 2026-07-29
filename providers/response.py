@@ -26,6 +26,51 @@ def _first_json_value(text):
     return value
 
 
+def _escape_stray_quotes(text):
+    """Escape unescaped double-quotes that appear inside JSON string values.
+
+    Gemini occasionally emits a verbatim clinical quote that itself contains
+    embedded quotation marks (e.g. a patient statement) without escaping them,
+    which breaks the string it's nested in ("Expecting ',' delimiter" /
+    "Expecting property name..."). Walk the text tracking string state; a
+    quote encountered inside a string is only treated as the real terminator
+    if it's immediately followed (modulo whitespace) by a JSON structural
+    character or end of text — otherwise it's a literal quote and gets escaped.
+    """
+    out = []
+    in_string = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                terminates = j >= n or text[j] in ",:}]"
+                if terminates:
+                    in_string = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        if ch == '"':
+            in_string = True
+        i += 1
+    return "".join(out)
+
+
 def parse_json_response(response_text):
     if response_text is None:
         return None
@@ -46,7 +91,15 @@ def parse_json_response(response_text):
     except json.JSONDecodeError:
         pass
 
-    # Last resort: Gemini occasionally emits a trailing comma before a
-    # closing brace/bracket, which json.loads rejects outright.
+    # Gemini occasionally emits a trailing comma before a closing
+    # brace/bracket, which json.loads rejects outright.
     deduped = _TRAILING_COMMA_RE.sub(r"\1", candidate)
-    return _first_json_value(deduped)
+    try:
+        return _first_json_value(deduped)
+    except json.JSONDecodeError:
+        pass
+
+    # Last resort: repair unescaped quotes nested inside string values (e.g. a
+    # verbatim clinical quote containing its own quotation marks).
+    repaired = _escape_stray_quotes(deduped)
+    return _first_json_value(repaired)

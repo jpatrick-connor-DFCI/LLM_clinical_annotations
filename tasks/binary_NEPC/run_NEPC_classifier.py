@@ -104,7 +104,12 @@ def read_mrns(path):
     """Read the patient identifiers from an existing pipeline TSV."""
     if not path.exists() or path.stat().st_size == 0:
         return set()
-    frame = pl.read_csv(path, separator="\t")
+    # truncate_ragged_lines tolerates historical rows whose error text broke
+    # the column count (e.g. an unescaped separator/quote from an older writer
+    # version) — we only need DFCI_MRN out of this read, so a truncated
+    # error/num_snippets value on a bad row is an acceptable trade-off for not
+    # crashing the whole run.
+    frame = pl.read_csv(path, separator="\t", truncate_ragged_lines=True)
     if "DFCI_MRN" not in frame.columns:
         raise ValueError(f"Missing DFCI_MRN column in {path}")
     return set(
@@ -117,7 +122,7 @@ def remove_failures(path, mrns):
     mrns = {int(mrn) for mrn in mrns}
     if not mrns or not path.exists() or path.stat().st_size == 0:
         return
-    frame = pl.read_csv(path, separator="\t")
+    frame = pl.read_csv(path, separator="\t", truncate_ragged_lines=True)
     if "DFCI_MRN" not in frame.columns:
         raise ValueError(f"Missing DFCI_MRN column in {path}")
     remaining = frame.filter(

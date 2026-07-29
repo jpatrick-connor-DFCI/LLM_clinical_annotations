@@ -59,6 +59,12 @@ def parse_args():
         default=_PROFILE.payload_max_chars,
         help="Max snippet chars packed into one LLM call (one chunk per patient until full).",
     )
+    parser.add_argument(
+        "--scan-workers",
+        type=int,
+        default=None,
+        help="Processes for note cleaning and trigger scanning (default: all cores).",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     return parser.parse_args()
 
@@ -88,6 +94,7 @@ def run(args):
         TRIGGER_REGEX,
         context_chars=args.context_chars,
         payload_max_chars=args.payload_max_chars,
+        max_workers=args.scan_workers,
     )
     total_chunks = sum(len(c) for c in patient_chunks.values())
     print(

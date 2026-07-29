@@ -14,8 +14,7 @@ import polars as pl
 
 from preprocessing.config import SNIPPET_PROFILES
 from preprocessing.notes import to_iso_date
-from preprocessing.triggers import build_snippet
-from preprocessing.utils import clean_note
+from preprocessing.snippets import scan_note_candidates
 
 _LONGITUDINAL_PROFILE = SNIPPET_PROFILES["longitudinal"]
 
@@ -62,12 +61,66 @@ def _note_uid(mrn, note_date, snippet, raw_note_id):
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
 
 
+def _candidate_to_record(candidate):
+    """Convert a scan_note_candidates() candidate into the record shape dedupe/pack expect.
+
+    scan_note_candidates (preprocessing/snippets.py) is the ProcessPoolExecutor-parallel
+    per-note scan shared with the binary_nepc path; its candidates carry `mrn`/`raw_note_id`
+    instead of `DFCI_MRN`/`note_uid`, so this adapts field names rather than duplicating
+    the scan logic.
+    """
+    mrn = candidate["mrn"]
+    note_date = candidate["note_date"]
+    return {
+        "note_uid": _note_uid(mrn, note_date, candidate["snippet"], candidate.get("raw_note_id")),
+        "DFCI_MRN": mrn,
+        "note_date": note_date,
+        "note_type": candidate["note_type"],
+        "trigger_categories": candidate["trigger_categories"],
+        "snippet": candidate["snippet"],
+    }
+
+
+def dedupe_candidates(candidates):
+    """Collapse copy-forward notes with identical cleaned snippet text per patient.
+
+    `candidates` is {mrn: [candidate, ...]} as returned by scan_note_candidates().
+    Dedup key is (mrn, snippet); the EARLIEST note_date wins as the provenance/
+    fallback date (so criterion-onset dates are not inflated). This must run in the
+    parent process (never per-worker) because the same snippet can be produced by
+    notes scanned in different workers.
+
+    Yields one record per kept (mrn, snippet) pair: note_uid, DFCI_MRN, note_date
+    (ISO or None), note_type, trigger_categories (sorted list), snippet.
+    """
+    # (mrn, snippet) -> chosen record, keeping the earliest note_date.
+    deduped = {}
+    for mrn, items in candidates.items():
+        for candidate in items:
+            record = _candidate_to_record(candidate)
+            key = (mrn, record["snippet"])
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = record
+            else:
+                # Keep the earliest available date as the canonical provenance.
+                existing_date = existing["note_date"] or ""
+                new_date = record["note_date"] or ""
+                if new_date and (not existing_date or new_date < existing_date):
+                    existing["note_date"] = record["note_date"]
+                    existing["note_type"] = record["note_type"]
+                    existing["note_uid"] = record["note_uid"]
+
+    yield from deduped.values()
+
+
 def iter_note_snippets(
     notes_df,
     trigger_regex,
     *,
     context_chars=_LONGITUDINAL_PROFILE.context_chars,
     snippet_max_chars=_LONGITUDINAL_PROFILE.max_chars,
+    max_workers=1,
 ):
     """Yield one snippet dict per trigger-bearing note, deduplicated per patient.
 
@@ -75,52 +128,21 @@ def iter_note_snippets(
     trigger_categories (sorted list), snippet. Copy-forward notes with identical
     cleaned snippet text are collapsed per patient, keeping the EARLIEST note_date
     as the provenance/fallback date (so criterion-onset dates are not inflated).
+
+    Thin wrapper over scan_note_candidates() + dedupe_candidates() kept for
+    backward compatibility / single-call convenience; group_patient_snippets calls
+    those two steps directly so it can report intermediate counts.
     """
     if notes_df.is_empty():
         return
-
-    # (mrn, snippet) -> chosen record, keeping the earliest note_date.
-    deduped = {}
-    for row in notes_df.iter_rows(named=True):
-        raw_text = row.get("CLINICAL_TEXT") or ""
-        note_type = row.get("NOTE_TYPE") or "Unknown"
-        cleaned = clean_note(raw_text, note_type=note_type)
-        if not cleaned:
-            continue
-        matches = find_matches(cleaned, trigger_regex)
-        if not matches:
-            continue
-        snippet = build_snippet(
-            cleaned, matches, context_chars=context_chars, max_chars=snippet_max_chars
-        )
-        if not snippet:
-            continue
-        mrn = int(row["DFCI_MRN"])
-        note_date = to_iso_date(row.get("EVENT_DATE"))
-        record = {
-            "note_uid": _note_uid(
-                mrn, note_date, snippet, row.get("RAW_NOTE_ID")
-            ),
-            "DFCI_MRN": mrn,
-            "note_date": note_date,
-            "note_type": note_type,
-            "trigger_categories": sorted({m[0] for m in matches}),
-            "snippet": snippet,
-        }
-        key = (mrn, snippet)
-        existing = deduped.get(key)
-        if existing is None:
-            deduped[key] = record
-        else:
-            # Keep the earliest available date as the canonical provenance.
-            existing_date = existing["note_date"] or ""
-            new_date = note_date or ""
-            if new_date and (not existing_date or new_date < existing_date):
-                existing["note_date"] = note_date
-                existing["note_type"] = note_type
-                existing["note_uid"] = record["note_uid"]
-
-    yield from deduped.values()
+    candidates = scan_note_candidates(
+        notes_df,
+        context_chars=context_chars,
+        snippet_max_chars=snippet_max_chars,
+        max_workers=max_workers,
+        trigger_regex=trigger_regex,
+    )
+    yield from dedupe_candidates(candidates)
 
 
 def resolve_date(stated_date, note_date):
@@ -147,6 +169,7 @@ def group_patient_snippets(
     context_chars=_LONGITUDINAL_PROFILE.context_chars,
     snippet_max_chars=_LONGITUDINAL_PROFILE.max_chars,
     payload_max_chars=_LONGITUDINAL_PROFILE.payload_max_chars,
+    max_workers=None,
 ):
     """Group deduped per-note snippets by patient into payload-sized chunks.
 
@@ -157,19 +180,31 @@ def group_patient_snippets(
     dropped, so earliest-occurrence dates and rare findings survive even for
     heavily-documented patients; the number of LLM calls is one per chunk
     (one for most patients, a few for outliers) instead of one per note.
+
+    The per-note scan (clean + trigger match + snippet) runs in parallel across
+    processes via scan_note_candidates (max_workers=None -> os.cpu_count());
+    dedup and packing stay single-process because dedup must see the whole
+    cohort (the same snippet can arrive from different notes in different
+    workers) and packing is comparatively cheap.
     """
-    by_mrn = {}
-    for rec in iter_note_snippets(
+    candidates = scan_note_candidates(
         notes_df,
-        trigger_regex,
         context_chars=context_chars,
         snippet_max_chars=snippet_max_chars,
-    ):
+        max_workers=max_workers,
+        trigger_regex=trigger_regex,
+    )
+
+    by_mrn = {}
+    for rec in dedupe_candidates(candidates):
         by_mrn.setdefault(rec["DFCI_MRN"], []).append(rec)
 
     patient_chunks = {}
     for mrn, recs in by_mrn.items():
-        recs.sort(key=lambda r: (r["note_date"] or "9999-99-99"))
+        # Tiebreaker on `snippet` after note_date: chunk_index is a stage-2 resume
+        # key (build_nepc_timeline.py), so sort order must be stable regardless of
+        # scan parallelism / worker count or dict/hash-order variation across runs.
+        recs.sort(key=lambda r: (r["note_date"] or "9999-99-99", r["snippet"]))
         chunks, current, current_len = [], [], 0
         for rec in recs:
             slen = len(rec["snippet"])

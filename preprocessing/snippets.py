@@ -17,7 +17,7 @@ from preprocessing.utils import clean_note
 _BINARY_NEPC_PROFILE = SNIPPET_PROFILES["binary_nepc"]
 
 
-def _scan_note_row(row, *, context_chars, snippet_max_chars):
+def _scan_note_row(row, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX):
     """Clean, trigger-scan, and snippet a single note row.
 
     Returns a candidate dict (mrn + snippet metadata) or None if the note has no
@@ -29,7 +29,7 @@ def _scan_note_row(row, *, context_chars, snippet_max_chars):
     cleaned = clean_note(raw_text, note_type=note_type)
     if not cleaned:
         return None
-    matches = find_trigger_matches(cleaned)
+    matches = find_trigger_matches(cleaned, trigger_regex)
     if not matches:
         return None
     snippet = build_snippet(
@@ -47,10 +47,11 @@ def _scan_note_row(row, *, context_chars, snippet_max_chars):
         "trigger_categories": sorted({m[0] for m in matches}),
         "trigger_count": len(matches),
         "snippet": snippet,
+        "raw_note_id": row.get("RAW_NOTE_ID"),
     }
 
 
-def _scan_note_chunk(rows, *, context_chars, snippet_max_chars):
+def _scan_note_chunk(rows, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX):
     """Scan a list of note rows in one worker call (amortizes IPC overhead)."""
     out = []
     for row in rows:
@@ -58,6 +59,7 @@ def _scan_note_chunk(rows, *, context_chars, snippet_max_chars):
             row,
             context_chars=context_chars,
             snippet_max_chars=snippet_max_chars,
+            trigger_regex=trigger_regex,
         )
         if candidate is not None:
             out.append(candidate)
@@ -75,12 +77,16 @@ def scan_note_candidates(
     context_chars=_BINARY_NEPC_PROFILE.context_chars,
     snippet_max_chars=_BINARY_NEPC_PROFILE.max_chars,
     max_workers=None,
+    trigger_regex=TRIGGER_REGEX,
 ):
     """Clean + trigger-scan + snippet every note, in parallel across processes.
 
     Returns {mrn: [candidate, ...]}. This is the CPU-heavy startup step; it is
     embarrassingly parallel across notes, so it is farmed out to a process pool.
     A worker count of 1 runs inline (useful for small cohorts / debugging).
+
+    `trigger_regex` is a plain {label: pattern_str} dict (not compiled `re`
+    objects), so it pickles cleanly across the ProcessPoolExecutor boundary.
     """
     rows = list(notes_df.iter_rows(named=True))
     if not rows:
@@ -102,6 +108,7 @@ def scan_note_candidates(
                 rows,
                 context_chars=context_chars,
                 snippet_max_chars=snippet_max_chars,
+                trigger_regex=trigger_regex,
             )
         )
         return candidates
@@ -114,6 +121,7 @@ def scan_note_candidates(
                 _scan_note_chunk,
                 context_chars=context_chars,
                 snippet_max_chars=snippet_max_chars,
+                trigger_regex=trigger_regex,
             ),
             _chunked(rows, chunk_size),
         ):

@@ -4,9 +4,10 @@ Reads gleason_evidence.tsv produced by collect_gleason_notes.py. Calls the LLM
 once per chunk, and aggregates the findings into a deduped per-patient timeline.
 
 Outputs (under <output-dir>):
-  gleason_extractions_raw.tsv   per-finding extractions (provenance, pre-dedup)
-  gleason_processed_patients.tsv  processed-patient log (resumability + failures)
-  gleason_timeline.tsv          deduped timeline (every score + date per patient)
+  gleason_extractions_raw.tsv     per-finding extractions (provenance, pre-dedup)
+  gleason_processed_chunks.tsv    per-chunk log — the unit of resume
+  gleason_processed_patients.tsv  processed-patient log (derived per-patient status)
+  gleason_timeline.tsv            deduped timeline (every score + date per patient)
 
 Usage:
   # Run collection first:
@@ -40,6 +41,7 @@ DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_gleason_timeline"
 
 RAW_COLUMNS = [
     "DFCI_MRN",
+    "chunk_index",
     "source_note_date",
     "gleason_primary",
     "gleason_secondary",
@@ -50,6 +52,10 @@ RAW_COLUMNS = [
     "is_historical_reference",
     "quote",
 ]
+
+# Sanity bound on chunk_index read back from the evidence TSV. Real patients have
+# single-digit chunk counts; anything beyond this is a misaligned row.
+MAX_CHUNK_INDEX = 10_000
 
 TIMELINE_COLUMNS = [
     "DFCI_MRN",
@@ -65,7 +71,17 @@ TIMELINE_COLUMNS = [
     "source_note_date",
 ]
 
-PROCESSED_COLUMNS = ["DFCI_MRN", "num_chunks", "num_findings", "status"]
+PROCESSED_COLUMNS = [
+    "DFCI_MRN",
+    "num_chunks",
+    "num_chunks_ok",
+    "num_findings",
+    "status",
+]
+
+# Per-chunk log: the unit of resume. A chunk that failed is retried on the next
+# run without re-calling the chunks that already succeeded.
+CHUNK_COLUMNS = ["DFCI_MRN", "chunk_index", "num_findings", "status"]
 
 
 def parse_args():
@@ -111,42 +127,162 @@ def append_rows(path, rows, columns):
         handle.write(text)
 
 
-def extract_patient(provider, client, model, max_retries, mrn, chunks):
-    """Run one LLM call per chunk; return the merged findings list for the patient."""
+def read_done_chunks(path):
+    """Return {(mrn, chunk_index)} for every chunk logged as status == "ok"."""
+    if not path.exists() or path.stat().st_size == 0:
+        return set()
+    log = pl.read_csv(
+        path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
+    )
+    if "DFCI_MRN" not in log.columns or "chunk_index" not in log.columns:
+        return set()
+    done = set()
+    for row in log.iter_rows(named=True):
+        if row.get("status") != "ok":
+            continue
+        mrn = _to_int(row.get("DFCI_MRN"))
+        idx = _to_int(row.get("chunk_index"))
+        if mrn is None or idx is None:
+            continue
+        done.add((mrn, idx))
+    return done
+
+
+def compact_log(path, columns, key_columns):
+    """Rewrite an append-only log keeping only the LAST row per key.
+
+    Retries append a fresh row rather than rewriting in place (which keeps the
+    hot loop crash-safe), so a patient retried across runs accumulates one row
+    per attempt. Collapsing at the end keeps the log a clean current-state view.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    log = pl.read_csv(
+        path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
+    )
+    if not all(c in log.columns for c in key_columns):
+        return
+    before = log.height
+    compacted = log.unique(subset=key_columns, keep="last", maintain_order=True)
+    if compacted.height == before:
+        return
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    compacted.select([c for c in columns if c in compacted.columns]).write_csv(
+        tmp_path, separator="\t"
+    )
+    tmp_path.replace(path)
+    print(f"  Compacted {path.name}: {before} -> {compacted.height} rows")
+
+
+def dedupe_raw_findings(path, columns, key_columns):
+    """Drop superseded rows from the raw findings log after a chunk retry.
+
+    Unlike compact_log, `.unique(keep="last")` is wrong here: a single chunk
+    legitimately writes MANY rows sharing one (mrn, chunk_index) — one per
+    finding — so collapsing to one row per key would destroy real findings,
+    not just retry duplicates. Instead, treat each contiguous run of rows
+    sharing a key as one "occurrence" (the hot loop appends a chunk's rows
+    together, so a retry's rows form a later, separate run) and keep every
+    row in the LAST occurrence, dropping earlier occurrences whole.
+    """
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    log = pl.read_csv(
+        path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
+    )
+    if not all(c in log.columns for c in key_columns):
+        return
+    before = log.height
+    key = pl.concat_str([pl.col(c).cast(pl.Utf8) for c in key_columns], separator="\x1f")
+    log = log.with_columns(key.alias("_key"))
+    # New run id each time the key differs from the previous row (rows within
+    # one chunk's append are contiguous, so this separates attempt from retry).
+    new_run = (log["_key"] != log["_key"].shift(1)).fill_null(True)
+    log = log.with_columns(new_run.cum_sum().alias("_run"))
+    last_run = log.group_by("_key").agg(pl.col("_run").max().alias("_last_run"))
+    log = log.join(last_run, on="_key")
+    deduped = log.filter(pl.col("_run") == pl.col("_last_run"))
+    if deduped.height == before:
+        return
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    deduped.select([c for c in columns if c in deduped.columns]).write_csv(
+        tmp_path, separator="\t"
+    )
+    tmp_path.replace(path)
+    print(f"  Deduped {path.name}: {before} -> {deduped.height} rows")
+
+
+def _extract_chunk(provider, client, model, max_retries, mrn, chunk):
+    """Run one LLM call for a single chunk.
+
+    Returns (findings, error). Exactly one of the two is meaningful: on error
+    findings is None.
+    """
+    payload = {
+        "patient_mrn": int(mrn),
+        "notes": [
+            {"note_date": r["note_date"], "note_type": r["note_type"], "note_text": r["snippet"]}
+            for r in chunk
+        ],
+    }
+    messages = [
+        {"role": "system", "content": GLEASON_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    response_text, error = provider.call_with_retry(client, model, messages, max_retries)
+    if error:
+        return None, error
+    try:
+        result = parse_json_response(response_text)
+    except json.JSONDecodeError as exc:
+        return None, f"json_parse: {exc}"
+    if not isinstance(result, dict):
+        return None, f"non_dict_response: {type(result).__name__}"
+    found = result.get("gleason_findings")
+    if not isinstance(found, list):
+        return None, "missing_gleason_findings"
+    return [f for f in found if isinstance(f, dict)], None
+
+
+def extract_patient(provider, client, model, max_retries, mrn, indexed_chunks):
+    """Run one LLM call per chunk, keeping the findings from every chunk that works.
+
+    `indexed_chunks` is a list of (chunk_index, chunk) pairs — only the chunks
+    still outstanding for this patient, so a resumed run never re-calls a chunk
+    that already succeeded.
+
+    Returns (findings, chunk_results):
+      findings      [(finding_dict, chunk_index), ...] for every chunk that
+                    succeeded. A failing chunk never discards its siblings' work.
+      chunk_results [{"chunk_index", "num_findings", "status"}, ...], one per
+                    attempted chunk, where status is "ok" or the error string.
+    """
     findings = []
-    for chunk in chunks:
-        payload = {
-            "patient_mrn": int(mrn),
-            "notes": [
-                {"note_date": r["note_date"], "note_type": r["note_type"], "note_text": r["snippet"]}
-                for r in chunk
-            ],
-        }
-        messages = [
-            {"role": "system", "content": GLEASON_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ]
-        response_text, error = provider.call_with_retry(client, model, messages, max_retries)
+    chunk_results = []
+    for chunk_index, chunk in indexed_chunks:
+        chunk_findings, error = _extract_chunk(
+            provider, client, model, max_retries, mrn, chunk
+        )
         if error:
-            return None, error
-        try:
-            result = parse_json_response(response_text)
-        except json.JSONDecodeError as exc:
-            return None, f"json_parse: {exc}"
-        if not isinstance(result, dict):
-            return None, f"non_dict_response: {type(result).__name__}"
-        chunk_findings = result.get("gleason_findings")
-        if not isinstance(chunk_findings, list):
-            return None, "missing_gleason_findings"
-        findings.extend(f for f in chunk_findings if isinstance(f, dict))
-    return findings, None
+            chunk_results.append(
+                {"chunk_index": chunk_index, "num_findings": 0, "status": error}
+            )
+            continue
+        findings.extend((f, chunk_index) for f in chunk_findings)
+        chunk_results.append({
+            "chunk_index": chunk_index,
+            "num_findings": len(chunk_findings),
+            "status": "ok",
+        })
+    return findings, chunk_results
 
 
 def raw_rows_from_findings(mrn, findings):
     rows = []
-    for finding in findings:
+    for finding, chunk_index in findings:
         rows.append({
             "DFCI_MRN": int(mrn),
+            "chunk_index": chunk_index,
             "source_note_date": finding.get("source_note_date"),
             "gleason_primary": finding.get("primary"),
             "gleason_secondary": finding.get("secondary"),
@@ -183,6 +319,10 @@ def build_timeline(raw_path, timeline_path):
     seen = set()
     rows = []
     skipped = 0
+    # Findings that parse fine but fail the clinical-range validation below (bad
+    # total, or primary/secondary outside 1-5) are otherwise dropped silently,
+    # hiding model errors behind a lower row count; count them so they're visible.
+    invalid_score = 0
     for r in raw.iter_rows(named=True):
         mrn_val = _to_int(r.get("DFCI_MRN"))
         if mrn_val is None:
@@ -199,10 +339,13 @@ def build_timeline(raw_path, timeline_path):
             total = primary + secondary
         # Require a usable total; drop grade-group-only or malformed extractions.
         if total is None or not (2 <= total <= 10):
+            invalid_score += 1
             continue
         if primary is not None and not (1 <= primary <= 5):
+            invalid_score += 1
             continue
         if secondary is not None and not (1 <= secondary <= 5):
+            invalid_score += 1
             continue
 
         grade_group = _to_int(r.get("grade_group"))
@@ -234,6 +377,8 @@ def build_timeline(raw_path, timeline_path):
 
     if skipped:
         print(f"  Skipped {skipped} malformed/misaligned raw rows during timeline build")
+    if invalid_score:
+        print(f"  Dropped {invalid_score} findings with an invalid/out-of-range Gleason score")
 
     if not rows:
         timeline = pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS})
@@ -255,6 +400,7 @@ def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = args.evidence_path or (args.output_dir / "gleason_evidence.tsv")
     raw_path = args.output_dir / "gleason_extractions_raw.tsv"
+    chunk_log_path = args.output_dir / "gleason_processed_chunks.tsv"
     processed_path = args.output_dir / "gleason_processed_patients.tsv"
     timeline_path = args.output_dir / "gleason_timeline.tsv"
 
@@ -265,7 +411,7 @@ def run(args):
         )
 
     if args.overwrite:
-        for path in (raw_path, processed_path, timeline_path):
+        for path in (raw_path, chunk_log_path, processed_path, timeline_path):
             path.unlink(missing_ok=True)
 
     evidence_df = pl.read_csv(evidence_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
@@ -286,6 +432,7 @@ def run(args):
               f"{evidence_df['DFCI_MRN'].n_unique()} patients")
 
     patient_chunks = {}
+    bad_chunk_index = 0
     for row in evidence_df.iter_rows(named=True):
         mrn = int(row["DFCI_MRN"])
         rec = {
@@ -293,11 +440,33 @@ def run(args):
             "note_type": row.get("note_type") or "Unknown",
             "snippet": row.get("snippet") or "",
         }
-        chunk_index = int(row.get("chunk_index") or 0)
+        try:
+            chunk_index = int(row.get("chunk_index") or 0)
+        except (TypeError, ValueError):
+            bad_chunk_index += 1
+            continue
+        # A misaligned row (which truncate_ragged_lines lets through) can carry a
+        # nonsense chunk_index; without a bound the fill loop below would allocate
+        # that many empty lists.
+        if not 0 <= chunk_index <= MAX_CHUNK_INDEX:
+            bad_chunk_index += 1
+            continue
         chunks = patient_chunks.setdefault(mrn, [])
         while len(chunks) <= chunk_index:
             chunks.append([])
         chunks[chunk_index].append(rec)
+
+    if bad_chunk_index:
+        print(f"  Skipped {bad_chunk_index} evidence rows with an invalid chunk_index")
+
+    # Chunks are packed contiguously by collect_gleason_notes.py, but a filtered or
+    # partially-malformed evidence file can leave a hole; drop empties so they
+    # aren't dispatched as empty LLM calls.
+    patient_chunks = {
+        mrn: [c for c in chunks if c]
+        for mrn, chunks in patient_chunks.items()
+    }
+    patient_chunks = {mrn: chunks for mrn, chunks in patient_chunks.items() if chunks}
 
     total_chunks = sum(len(c) for c in patient_chunks.values())
     print(
@@ -305,53 +474,94 @@ def run(args):
         f"({total_chunks} LLM calls across chunks)"
     )
 
-    completed = set()
-    if processed_path.exists() and processed_path.stat().st_size > 0:
-        log = pl.read_csv(processed_path, separator="\t")
-        completed = set(
-            log.filter(pl.col("status") == "ok")["DFCI_MRN"].cast(pl.Int64).to_list()
-        )
-    print(f"Already completed patients: {len(completed)}")
+    # Resume at chunk granularity: a patient whose chunk 2 failed re-runs only
+    # chunk 2, keeping the findings chunks 0 and 1 already produced.
+    done_chunks = read_done_chunks(chunk_log_path)
+    if done_chunks:
+        print(f"Already completed chunks: {len(done_chunks)}")
 
-    todo = [m for m in sorted(patient_chunks) if m not in completed]
+    todo = []
+    for mrn in sorted(patient_chunks):
+        outstanding = [
+            (i, chunk)
+            for i, chunk in enumerate(patient_chunks[mrn])
+            if (mrn, i) not in done_chunks
+        ]
+        if outstanding:
+            todo.append((mrn, outstanding))
     if args.limit_patients is not None:
         todo = todo[: args.limit_patients]
-    print(f"Patients to extract with LLM: {len(todo)}")
+    outstanding_chunks = sum(len(c) for _, c in todo)
+    print(
+        f"Patients to extract with LLM: {len(todo)} "
+        f"({outstanding_chunks} outstanding chunks)"
+    )
 
     if todo:
         provider = get_provider(args.provider)
         model = args.model or provider.default_model
         client = provider.build_client()
 
-        def worker(mrn):
-            chunks = patient_chunks[mrn]
-            findings, error = extract_patient(
-                provider, client, model, args.max_retries, mrn, chunks
+        def worker(mrn, indexed_chunks):
+            findings, chunk_results = extract_patient(
+                provider, client, model, args.max_retries, mrn, indexed_chunks
             )
-            return mrn, len(chunks), findings, error
+            return mrn, findings, chunk_results
 
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-            futures = {executor.submit(worker, m): m for m in todo}
+            futures = {
+                executor.submit(worker, mrn, indexed_chunks): mrn
+                for mrn, indexed_chunks in todo
+            }
             for future in tqdm(
                 as_completed(futures), total=len(futures), desc="Patients", unit="pt"
             ):
-                mrn, n_chunks, findings, error = future.result()
-                if error or findings is None:
-                    append_rows(
-                        processed_path,
-                        [{"DFCI_MRN": int(mrn), "num_chunks": n_chunks, "num_findings": 0,
-                          "status": error or "no_result"}],
-                        PROCESSED_COLUMNS,
-                    )
-                    continue
+                mrn, findings, chunk_results = future.result()
                 rows = raw_rows_from_findings(mrn, findings)
                 append_rows(raw_path, rows, RAW_COLUMNS)
                 append_rows(
+                    chunk_log_path,
+                    [{"DFCI_MRN": int(mrn), **r} for r in chunk_results],
+                    CHUNK_COLUMNS,
+                )
+                n_total = len(patient_chunks[mrn])
+                n_ok = sum(1 for r in chunk_results if r["status"] == "ok")
+                # Add back chunks skipped by resume (never in chunk_results this run).
+                # Valid ONLY because read_done_chunks filters to status == "ok", so
+                # "unattempted" and "already ok" are the same set today. If a future
+                # skip reason is added (e.g. an evidence-hash mismatch invalidating
+                # stale chunk indices), that equivalence breaks and this needs to
+                # explicitly track ok-vs-skipped-for-other-reasons separately.
+                n_ok += n_total - len(chunk_results)  # chunks done on an earlier run
+                failed = [r["status"] for r in chunk_results if r["status"] != "ok"]
+                if not failed:
+                    status = "ok"
+                elif n_ok:
+                    status = f"partial:{len(failed)}/{n_total}"
+                else:
+                    status = f"failed:{failed[0]}"
+                append_rows(
                     processed_path,
-                    [{"DFCI_MRN": int(mrn), "num_chunks": n_chunks, "num_findings": len(rows),
-                      "status": "ok"}],
+                    [{
+                        "DFCI_MRN": int(mrn),
+                        "num_chunks": n_total,
+                        "num_chunks_ok": n_ok,
+                        "num_findings": len(rows),
+                        "status": status,
+                    }],
                     PROCESSED_COLUMNS,
                 )
+
+    # Compact once at the end rather than per patient: the hot loop stays
+    # append-only (crash-safe), and retried patients leave one row, not one per run.
+    compact_log(processed_path, PROCESSED_COLUMNS, ["DFCI_MRN"])
+    compact_log(chunk_log_path, CHUNK_COLUMNS, ["DFCI_MRN", "chunk_index"])
+    # Raw findings need a different collapse than the two logs above: a retried
+    # chunk re-appends its findings, and without this they'd double-count in the
+    # timeline build (build_timeline dedupes by score/date/specimen, so exact
+    # duplicates collapse there, but a retry whose finding set genuinely CHANGED
+    # would otherwise double-count instead of superseding).
+    dedupe_raw_findings(raw_path, RAW_COLUMNS, ["DFCI_MRN", "chunk_index"])
 
     n = build_timeline(raw_path, timeline_path)
     print(f"Wrote Gleason timeline ({n} rows): {timeline_path}")

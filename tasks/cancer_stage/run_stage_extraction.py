@@ -65,6 +65,7 @@ TIMELINE_COLUMNS = [
     "stage_group",
     "stage_date",
     "date_source",
+    "date_precision",
     "is_historical_reference",
     "supporting_quote",
     "confidence",
@@ -272,7 +273,7 @@ def build_timeline(raw_path, timeline_path):
         cancer_type_raw = _str(r.get("cancer_type"))
         stage_group_raw = _str(r.get("stage_group"))
 
-        stage_date, date_source = resolve_date(
+        stage_date, date_source, date_precision = resolve_date(
             r.get("stage_date"), r.get("source_note_date")
         )
 
@@ -292,6 +293,7 @@ def build_timeline(raw_path, timeline_path):
             "stage_group": stage_group_raw or None,
             "stage_date": stage_date,
             "date_source": date_source,
+            "date_precision": date_precision,
             "is_historical_reference": r.get("is_historical_reference"),
             "supporting_quote": r.get("supporting_quote"),
             "confidence": r.get("confidence"),

@@ -80,6 +80,7 @@ TIMELINE_COLUMNS = [
     "DFCI_MRN",
     "gleason_date",
     "date_source",
+    "date_precision",
     "gleason_primary",
     "gleason_secondary",
     "gleason_total",
@@ -441,7 +442,7 @@ def build_timeline(raw_path, timeline_path):
         if grade_group is None or not (1 <= grade_group <= 5):
             grade_group = derive_grade_group(primary, secondary)
 
-        gleason_date, date_source = resolve_date(
+        gleason_date, date_source, date_precision = resolve_date(
             r.get("scoring_date"), r.get("source_note_date")
         )
         specimen_type = r.get("specimen_type")
@@ -454,6 +455,7 @@ def build_timeline(raw_path, timeline_path):
             "DFCI_MRN": mrn,
             "gleason_date": gleason_date,
             "date_source": date_source,
+            "date_precision": date_precision,
             "gleason_primary": primary,
             "gleason_secondary": secondary,
             "gleason_total": total,

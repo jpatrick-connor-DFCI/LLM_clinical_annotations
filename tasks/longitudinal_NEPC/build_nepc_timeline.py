@@ -99,6 +99,7 @@ TIMELINE_COLUMNS = [
     "DFCI_MRN",
     "event_date",
     "date_source",
+    "date_precision",
     "criterion_added",
     "criterion_label",
     "modality",
@@ -489,7 +490,7 @@ def build_timeline(raw_path, timeline_path):
             skipped += 1
             continue
         mrn = int(mrn_val)
-        event_date, date_source = resolve_date(
+        event_date, date_source, date_precision = resolve_date(
             r.get("diagnosis_date"), r.get("source_note_date")
         )
         record = {
@@ -498,6 +499,7 @@ def build_timeline(raw_path, timeline_path):
             "criterion_label": CRITERION_LABELS[criterion],
             "event_date": event_date,
             "date_source": date_source,
+            "date_precision": date_precision,
             "modality": r.get("modality"),
             "visceral_met_pattern": r.get("visceral_met_pattern"),
             "supporting_quote": r.get("quote"),

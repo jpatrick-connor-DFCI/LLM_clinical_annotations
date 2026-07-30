@@ -10,8 +10,10 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime
 
 import polars as pl
+from dateutil import parser as date_parser
 
 from preprocessing.config import SNIPPET_PROFILES
 from preprocessing.notes import to_iso_date
@@ -146,21 +148,80 @@ def iter_note_snippets(
     yield from dedupe_candidates(candidates)
 
 
+# Two anchors that disagree on every component. Parsing the same text against both
+# and comparing the results tells us exactly which components dateutil actually
+# read from the text vs. filled in from the default -- the only reliable way to
+# recover precision from dateutil's API, since it doesn't expose that itself.
+# (This replaces to_iso_date's approach of defaulting to date.today(), which makes
+# a filled-in component silently depend on the day the pipeline happens to run.)
+_ANCHOR_A = datetime(1904, 1, 1)
+_ANCHOR_B = datetime(1905, 7, 13)
+
+
+def parse_stated_date(text):
+    """Parse the LLM's free-text stated date deterministically -- never from `date.today()`.
+
+    Returns (iso_date_or_None, date_precision) where date_precision is one of
+    "day" / "month" / "year" / "unknown". Unlike `to_iso_date` (preprocessing/notes.py),
+    which is used on already well-formed structured EVENT_DATE values across the
+    500k-note scan path, this function is specifically for the LLM's stated
+    diagnosis/scoring/stage date, where partial dates ("2021", "June 2021") are
+    expected and dateutil's default of filling missing components from today's
+    date would make the resolved onset date depend on the day the pipeline runs.
+    """
+    if value_is_missing(text):
+        return None, "unknown"
+    stripped = str(text).strip()
+    if not stripped or stripped.lower() == "nan":
+        return None, "unknown"
+
+    try:
+        parsed_a = date_parser.parse(stripped, default=_ANCHOR_A)
+        parsed_b = date_parser.parse(stripped, default=_ANCHOR_B)
+    except (ValueError, OverflowError, TypeError):
+        return None, "unknown"
+
+    year = parsed_a.year if parsed_a.year == parsed_b.year else None
+    month = parsed_a.month if parsed_a.month == parsed_b.month else None
+    day = parsed_a.day if parsed_a.day == parsed_b.day else None
+
+    if year is None:
+        # Neither anchor's year survived -- the text carried no recognizable date.
+        return None, "unknown"
+    if month is None:
+        return f"{year:04d}-01-01", "year"
+    if day is None:
+        return f"{year:04d}-{month:02d}-01", "month"
+    return f"{year:04d}-{month:02d}-{day:02d}", "day"
+
+
+def value_is_missing(value):
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return False
+
+
 def resolve_date(stated_date, note_date):
     """Resolve an event date: a valid stated date wins, else fall back to note_date.
 
-    Returns (resolved_iso_or_None, date_source) where date_source is
-    "stated" | "note_date" | "unknown". Both inputs are normalized through
-    to_iso_date, so NaN / empty / unparseable values never leak through (and a
-    missing note_date can't crash downstream string-sorted aggregation).
+    Returns (resolved_iso_or_None, date_source, date_precision) where date_source is
+    "stated" | "note_date" | "unknown" and date_precision is "day" | "month" | "year" |
+    "unknown". The stated date comes from the LLM's free text and is parsed via
+    parse_stated_date, which never fills missing components from date.today() (see
+    that function's docstring for why -- this was previously the to_iso_date-driven
+    non-reproducible-date bug). note_date is structured EVENT_DATE data and is
+    normalized through to_iso_date as before; date_precision is "day" for that
+    fallback since note_date is always a full calendar date.
     """
-    iso = to_iso_date(stated_date)
+    iso, precision = parse_stated_date(stated_date)
     if iso:
-        return iso, "stated"
+        return iso, "stated", precision
     note_iso = to_iso_date(note_date)
     if note_iso:
-        return note_iso, "note_date"
-    return None, "unknown"
+        return note_iso, "note_date", "day"
+    return None, "unknown", "unknown"
 
 
 def group_patient_snippets(

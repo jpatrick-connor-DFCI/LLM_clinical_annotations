@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 from preprocessing.config import DEFAULT_DATA_PATH, PROSTATE_TEXT_CSV, SNIPPET_PROFILES  # noqa: E402
 from preprocessing.longitudinal import (  # noqa: E402
     evidence_scan_config_key,
+    file_sha256,
     filter_note_types,
     group_patient_snippets,
     read_scan_config_meta,
@@ -87,7 +88,16 @@ def parse_args():
         action="store_true",
         help="Rescan from scratch even if existing evidence matches these settings.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.context_chars < 0:
+        parser.error("--context-chars must be >= 0")
+    if args.payload_max_chars < _PROFILE.max_chars:
+        parser.error(
+            f"--payload-max-chars must be >= the per-snippet cap ({_PROFILE.max_chars})"
+        )
+    if args.scan_workers is not None and args.scan_workers < 1:
+        parser.error("--scan-workers must be >= 1")
+    return args
 
 
 def run(args):
@@ -96,9 +106,26 @@ def run(args):
     meta_path = args.output_dir / "avpc_nepc_evidence.meta.json"
     snippet_max_chars = SNIPPET_PROFILES["longitudinal"].max_chars
 
+    if args.context_chars < 0:
+        raise ValueError("context_chars must be >= 0")
+    if args.payload_max_chars < snippet_max_chars:
+        raise ValueError(
+            f"payload_max_chars must be >= snippet_max_chars ({snippet_max_chars})"
+        )
+    if args.scan_workers is not None and args.scan_workers < 1:
+        raise ValueError("scan_workers must be >= 1")
+
     if args.overwrite:
-        evidence_path.unlink(missing_ok=True)
-        meta_path.unlink(missing_ok=True)
+        for path in (
+            evidence_path,
+            meta_path,
+            args.output_dir / "avpc_nepc_extractions_raw.tsv",
+            args.output_dir / "avpc_nepc_processed_chunks.tsv",
+            args.output_dir / "avpc_nepc_processed_patients.tsv",
+            args.output_dir / "avpc_nepc_timeline.tsv",
+            args.output_dir / "avpc_nepc_rejected_findings.tsv",
+        ):
+            path.unlink(missing_ok=True)
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
     notes_df = load_notes(
@@ -139,6 +166,13 @@ def run(args):
                 "Re-run with --overwrite instead of mixing incompatible evidence "
                 "and chunk state."
             )
+        recorded_digest = existing_meta.get("evidence_sha256")
+        actual_digest = file_sha256(evidence_path)
+        if not recorded_digest or recorded_digest != actual_digest:
+            raise ValueError(
+                "Existing evidence content does not match its metadata sidecar. "
+                "Re-run with --overwrite to rebuild evidence and downstream state."
+            )
         print(f"Existing evidence matches current scan settings, reusing: {evidence_path}")
         return
 
@@ -171,7 +205,9 @@ def run(args):
         evidence = pl.DataFrame({c: [r.get(c) for r in rows] for c in EVIDENCE_COLUMNS})
     else:
         evidence = pl.DataFrame(schema={c: pl.Utf8 for c in EVIDENCE_COLUMNS})
-    evidence.write_csv(evidence_path, separator="\t")
+    evidence_tmp = evidence_path.with_name(f".{evidence_path.name}.tmp")
+    evidence.write_csv(evidence_tmp, separator="\t")
+    evidence_tmp.replace(evidence_path)
     write_scan_config_meta(
         meta_path,
         scan_config,
@@ -179,6 +215,7 @@ def run(args):
         snippet_max_chars=snippet_max_chars,
         payload_max_chars=args.payload_max_chars,
         note_types=args.note_types,
+        evidence_sha256=file_sha256(evidence_path),
     )
     print(f"Wrote AVPC/NEPC evidence ({evidence.height} rows): {evidence_path}")
 

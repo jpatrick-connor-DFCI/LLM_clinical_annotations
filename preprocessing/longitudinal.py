@@ -249,6 +249,17 @@ def group_patient_snippets(
     cohort (the same snippet can arrive from different notes in different
     workers) and packing is comparatively cheap.
     """
+    if context_chars < 0:
+        raise ValueError("context_chars must be >= 0")
+    if snippet_max_chars < 1:
+        raise ValueError("snippet_max_chars must be >= 1")
+    if payload_max_chars < snippet_max_chars:
+        raise ValueError(
+            "payload_max_chars must be >= snippet_max_chars so a single snippet "
+            "cannot exceed the advertised per-call payload budget"
+        )
+    if max_workers is not None and max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
     candidates = scan_note_candidates(
         notes_df,
         context_chars=context_chars,
@@ -325,6 +336,15 @@ def evidence_scan_config_key(
         )).encode()
     )
     return hasher.hexdigest()[:16]
+
+
+def file_sha256(path):
+    """Return the SHA-256 digest of an artifact without loading it into memory."""
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
 
 
 def write_scan_config_meta(meta_path, scan_config, **extra):

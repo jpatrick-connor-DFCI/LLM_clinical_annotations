@@ -59,6 +59,32 @@ python tasks/binary_NEPC/run_NEPC_classifier.py \
 
 Every preprocessing CLI and task runner supports `--help`.
 
+### Longitudinal AVPC/NEPC
+
+The longitudinal AVPC/NEPC runner uses a map/reduce extraction:
+
+1. `collect_nepc_notes.py` writes content-hashed evidence chunks.
+2. `build_nepc_timeline.py` maps each chunk into validated atomic evidence.
+3. A patient-level synthesis combines all chunk maps so composite Aparicio
+   criteria can use facts documented in different notes/chunks.
+
+Resume state is bound to the evidence content, provider, model, prompt text,
+and output schema. If any of these change, rerun stage 1 and/or stage 2 with
+`--overwrite` as instructed by the CLI rather than mixing incompatible runs.
+Grounded items that fail validation are quarantined in
+`avpc_nepc_rejected_findings.tsv`; affected successful rows use the
+`ok_with_rejections` status so partial results remain visible and auditable.
+
+```bash
+python preprocessing/cli/collect_nepc_notes.py \
+    --notes-csv /path/to/prostate_text_data.csv \
+    --output-dir /path/to/avpc_nepc
+
+python tasks/longitudinal_NEPC/build_nepc_timeline.py \
+    --output-dir /path/to/avpc_nepc \
+    --provider vertex_ai
+```
+
 ## Setup
 
 ```bash

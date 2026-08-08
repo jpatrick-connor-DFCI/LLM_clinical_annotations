@@ -290,22 +290,35 @@ def test_stage_and_gleason_findings_require_grounded_quotes_and_dates():
         {
             "note_date": "2024-01-02",
             "note_type": "Pathology",
-            "snippet": "The prostate biopsy is Gleason 4+3=7, Grade Group 3, stage III.",
+            "snippet": "Prostate adenocarcinoma with bone metastasis is Gleason 4+3=7, Grade Group 3, stage III.",
         }
     ]
     stage = {
         "cancer_type": "prostate cancer",
+        "histology": "adenocarcinoma",
+        "primary_site": "prostate",
+        "metastatic_sites": ["bone", "bone"],
         "staging_system": "AJCC",
         "stage_raw": "stage III",
         "stage_group": "III",
         "stage_date": None,
         "source_note_date": "2024-01-02",
         "is_historical_reference": False,
-        "supporting_quote": "The prostate biopsy is Gleason 4+3=7, Grade Group 3, stage III.",
+        "supporting_quote": "Prostate adenocarcinoma with bone metastasis is Gleason 4+3=7, Grade Group 3, stage III.",
         "confidence": "high",
         "rationale": "The stage is explicit.",
     }
-    assert validate_stage_finding(stage, chunk)[1] is None
+    normalized_stage, error = validate_stage_finding(stage, chunk)
+    assert error is None
+    assert normalized_stage["histology"] == "adenocarcinoma"
+    assert normalized_stage["primary_site"] == "prostate"
+    assert normalized_stage["metastatic_sites"] == ["bone"]
+    invalid_sites = dict(stage, metastatic_sites="bone")
+    assert validate_stage_finding(invalid_sites, chunk)[1] == "invalid_metastatic_sites"
+    ungrounded_histology = dict(stage, histology="small cell carcinoma")
+    assert validate_stage_finding(ungrounded_histology, chunk)[1] == (
+        "histology_not_in_evidence"
+    )
     stage["supporting_quote"] = "Invented stage evidence."
     assert validate_stage_finding(stage, chunk)[1] == (
         "supporting_quote_or_source_date_not_in_evidence"
@@ -320,7 +333,7 @@ def test_stage_and_gleason_findings_require_grounded_quotes_and_dates():
         "scoring_date": None,
         "source_note_date": "2024-01-02",
         "is_historical_reference": False,
-        "quote": "The prostate biopsy is Gleason 4+3=7, Grade Group 3, stage III.",
+        "quote": "Prostate adenocarcinoma with bone metastasis is Gleason 4+3=7, Grade Group 3, stage III.",
     }
     assert validate_gleason_finding(gleason, chunk)[1] is None
     gleason["source_note_date"] = "2024-01-03"

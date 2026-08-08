@@ -528,7 +528,7 @@
               <td>Pan-cancer by default; optional MRN restriction</td>
               <td>Stage-group and named-system trigger families</td>
               <td>One call per patient chunk</td>
-              <td>Deduplicated stage-change timeline</td>
+              <td>Stage-change timeline with disease type, histology, and anatomic sites</td>
             </tr>
             <tr>
               <td><a href="#gleason">Gleason</a></td>
@@ -996,9 +996,9 @@
           <div class="process-step"><div><strong>Collect stage-bearing snippets.</strong><p>The pan-cancer collector applies stage trigger regexes during the parquet scan, cleans/window notes, and deduplicates identical patient snippets while retaining the earliest note date.</p></div></div>
           <div class="process-step"><div><strong>Write evidence and scan metadata.</strong><p><code>stage_evidence.parquet</code> stores note UID, MRN, note date/type, native-list trigger categories, and snippet. The Parquet sidecar binds scan configuration and the evidence SHA-256.</p></div></div>
           <div class="process-step"><div><strong>Group evidence at extraction time.</strong><p>The runner orders evidence chronologically and greedily packs every snippet into one or more patient chunks under <code>payload_max_chars</code>; no evidence row is dropped.</p></div></div>
-          <div class="process-step"><div><strong>Extract every explicit staging event.</strong><p>Each finding includes cancer type, stated system and raw value, normalized base group when directly recoverable, stated stage date, source-note date, historical-reference flag, quote, confidence, and rationale.</p></div></div>
-          <div class="process-step"><div><strong>Reject invalid patient results.</strong><p>Each event must have a cancer type and stage value, valid group normalization, grounded quote/source date, parseable non-future stage date, boolean historical flag, valid confidence, and rationale. Any failed chunk means the patient is not marked complete.</p></div></div>
-          <div class="process-step"><div><strong>Build the stage-change timeline.</strong><p>Dates resolve from the stated stage date or fall back to source-note date with tracked precision. Exact duplicate events collapse, then consecutive repeated stage state is suppressed within patient + cancer type + staging system.</p></div></div>
+          <div class="process-step"><div><strong>Extract every explicit staging event.</strong><p>Each finding includes cancer type, nullable histology and primary site, a native list of metastatic sites, stated system/raw value, normalized base group, dates, historical-reference flag, quote, confidence, and rationale.</p></div></div>
+          <div class="process-step"><div><strong>Reject invalid patient results.</strong><p>Each event must have a cancer type and stage value; histology and primary site must be strings or null, and metastatic sites must be a string list. Every non-null histology/site value and the supporting quote must be grounded in the supplied note chunk; dates, stage normalization, historical status, confidence, and rationale are also validated.</p></div></div>
+          <div class="process-step"><div><strong>Build the stage-change timeline.</strong><p>Dates resolve from the stated stage date or fall back to source-note date with tracked precision. Exact duplicates collapse, while stage or metastatic-distribution changes are retained within each patient, cancer, primary-site, histology, and staging-system lineage.</p></div></div>
           <div class="process-step"><div><strong>Guard resumability.</strong><p>The run fingerprint includes evidence SHA-256, provider, model, full prompt and safety context, schema version, output schemas, and payload size. Only patients logged <code>ok</code> are skipped on rerun.</p></div></div>
         </div>
       </div>
@@ -1031,6 +1031,9 @@
         <div class="schema">
           <div class="field"><code>DFCI_MRN</code><p>Patient identifier.</p></div>
           <div class="field"><code>cancer_type</code><p>Required cancer being staged.</p></div>
+          <div class="field"><code>histology</code><p>Explicit histologic subtype, or null when unstated.</p></div>
+          <div class="field"><code>primary_site</code><p>Explicit anatomic origin of the primary cancer, or null.</p></div>
+          <div class="field"><code>metastatic_sites</code><p>Native Parquet list of explicitly documented metastatic locations.</p></div>
           <div class="field"><code>staging_system</code><p>Stated system or null.</p></div>
           <div class="field"><code>stage_raw</code><p>Original staging expression.</p></div>
           <div class="field"><code>stage_group</code><p>Directly recoverable normalized I–IV group.</p></div>

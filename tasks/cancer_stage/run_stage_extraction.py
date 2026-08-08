@@ -37,7 +37,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import CLINICAL_SAFETY_CONTEXT, SNIPPET_PROFILES  # noqa: E402
-from preprocessing.grounding import find_quote_support  # noqa: E402
+from preprocessing.grounding import find_quote_support, quote_core  # noqa: E402
 from preprocessing.longitudinal import (  # noqa: E402
     file_sha256,
     flatten_ws,
@@ -49,6 +49,7 @@ from preprocessing.parquet_io import (  # noqa: E402
     append_rows_atomic,
     read_metadata,
     write_metadata,
+    write_parquet_atomic,
     write_rows_atomic,
 )
 from providers import get_provider  # noqa: E402
@@ -64,6 +65,9 @@ RAW_COLUMNS = [
     "DFCI_MRN",
     "source_note_date",
     "cancer_type",
+    "histology",
+    "primary_site",
+    "metastatic_sites",
     "staging_system",
     "stage_raw",
     "stage_group",
@@ -77,6 +81,9 @@ RAW_COLUMNS = [
 TIMELINE_COLUMNS = [
     "DFCI_MRN",
     "cancer_type",
+    "histology",
+    "primary_site",
+    "metastatic_sites",
     "staging_system",
     "stage_raw",
     "stage_group",
@@ -90,7 +97,7 @@ TIMELINE_COLUMNS = [
 ]
 
 PROCESSED_COLUMNS = ["DFCI_MRN", "num_chunks", "num_findings", "status"]
-STAGE_EXTRACTION_SCHEMA_VERSION = "cancer-stage-grounded-parquet-v3"
+STAGE_EXTRACTION_SCHEMA_VERSION = "cancer-stage-grounded-parquet-v4"
 
 
 def parse_args():
@@ -230,6 +237,29 @@ def _normalize_stage_group(val):
     return cleaned if cleaned in _VALID_STAGES else None
 
 
+def _normalize_string_set(value):
+    """Normalize a JSON list to a deterministic case-insensitive string set."""
+    if not isinstance(value, list):
+        return None
+    unique = {}
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        text = item.strip()
+        unique.setdefault(text.casefold(), text)
+    return [unique[key] for key in sorted(unique)]
+
+
+def _value_is_grounded(value, chunk):
+    needle = quote_core(value).casefold()
+    if not needle:
+        return False
+    return any(
+        needle in quote_core(item.get("snippet")).casefold()
+        for item in chunk
+    )
+
+
 def validate_stage_finding(finding, chunk):
     """Validate one stage event and ground its quote/date in the current chunk."""
     if not isinstance(finding, dict):
@@ -237,6 +267,21 @@ def validate_stage_finding(finding, chunk):
     cancer_type = finding.get("cancer_type")
     if not isinstance(cancer_type, str) or not cancer_type.strip():
         return None, "missing_cancer_type"
+    histology = finding.get("histology")
+    if histology not in (None, "") and not isinstance(histology, str):
+        return None, "invalid_histology"
+    primary_site = finding.get("primary_site")
+    if primary_site not in (None, "") and not isinstance(primary_site, str):
+        return None, "invalid_primary_site"
+    metastatic_sites = _normalize_string_set(finding.get("metastatic_sites"))
+    if metastatic_sites is None:
+        return None, "invalid_metastatic_sites"
+    if histology and not _value_is_grounded(histology, chunk):
+        return None, "histology_not_in_evidence"
+    if primary_site and not _value_is_grounded(primary_site, chunk):
+        return None, "primary_site_not_in_evidence"
+    if any(not _value_is_grounded(site, chunk) for site in metastatic_sites):
+        return None, "metastatic_site_not_in_evidence"
     stage_raw = finding.get("stage_raw") or finding.get("stage_group")
     if not isinstance(stage_raw, str) or not stage_raw.strip():
         return None, "missing_stage_raw"
@@ -281,6 +326,9 @@ def validate_stage_finding(finding, chunk):
     normalized.update(
         {
             "cancer_type": cancer_type.strip(),
+            "histology": histology.strip() if histology else None,
+            "primary_site": primary_site.strip() if primary_site else None,
+            "metastatic_sites": metastatic_sites,
             "staging_system": staging_system.strip() if staging_system else None,
             "stage_raw": stage_raw.strip(),
             "stage_group": normalized_group,
@@ -298,6 +346,9 @@ def raw_rows_from_findings(mrn, findings):
             "DFCI_MRN": int(mrn),
             "source_note_date": finding.get("source_note_date"),
             "cancer_type": finding.get("cancer_type"),
+            "histology": finding.get("histology"),
+            "primary_site": finding.get("primary_site"),
+            "metastatic_sites": finding.get("metastatic_sites") or [],
             "staging_system": finding.get("staging_system"),
             "stage_raw": finding.get("stage_raw") or finding.get("stage_group"),
             "stage_group": _normalize_stage_group(
@@ -338,10 +389,28 @@ def _to_numeric_scalar(value):
         return None
 
 
+def _string_list(value):
+    """Return a deterministic list for a list-valued Parquet cell."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return sorted(
+        {str(item).strip() for item in value if str(item).strip()},
+        key=str.casefold,
+    )
+
+
+def _empty_timeline_frame():
+    schema = {column: pl.String for column in TIMELINE_COLUMNS}
+    schema["DFCI_MRN"] = pl.Int64
+    schema["metastatic_sites"] = pl.List(pl.String)
+    schema["is_historical_reference"] = pl.Boolean
+    return pl.DataFrame(schema=schema)
+
+
 def build_timeline(raw_path, timeline_path):
     """Deduplicate raw findings into the stage timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        write_rows_atomic(timeline_path, [], TIMELINE_COLUMNS)
+        write_parquet_atomic(_empty_timeline_frame(), timeline_path)
         return 0
 
     raw = pl.read_parquet(raw_path)
@@ -355,6 +424,9 @@ def build_timeline(raw_path, timeline_path):
 
         # Normalize dedup key fields so formatting differences don't create duplicates.
         cancer_type_raw = _str(r.get("cancer_type"))
+        histology_raw = _str(r.get("histology"))
+        primary_site_raw = _str(r.get("primary_site"))
+        metastatic_sites = _string_list(r.get("metastatic_sites"))
         staging_system_raw = _str(r.get("staging_system"))
         stage_raw = _str(r.get("stage_raw"))
         stage_group_raw = _str(r.get("stage_group"))
@@ -366,6 +438,9 @@ def build_timeline(raw_path, timeline_path):
         key = (
             mrn,
             cancer_type_raw.lower() or None,
+            histology_raw.lower() or None,
+            primary_site_raw.lower() or None,
+            tuple(site.casefold() for site in metastatic_sites),
             staging_system_raw.lower() or None,
             stage_raw.lower() or None,
             stage_group_raw.upper() or None,
@@ -378,6 +453,9 @@ def build_timeline(raw_path, timeline_path):
         rows.append({
             "DFCI_MRN": mrn,
             "cancer_type": cancer_type_raw or None,
+            "histology": histology_raw or None,
+            "primary_site": primary_site_raw or None,
+            "metastatic_sites": metastatic_sites,
             "staging_system": staging_system_raw or None,
             "stage_raw": stage_raw or None,
             "stage_group": stage_group_raw or None,
@@ -391,13 +469,15 @@ def build_timeline(raw_path, timeline_path):
         })
 
     if not rows:
-        timeline = pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS})
+        timeline = _empty_timeline_frame()
     else:
         timeline = pl.DataFrame({c: [row.get(c) for row in rows] for c in TIMELINE_COLUMNS})
         timeline = timeline.sort(
-            ["DFCI_MRN", "cancer_type", "staging_system", "stage_date"], nulls_last=True
+            ["DFCI_MRN", "cancer_type", "primary_site", "histology", "staging_system", "stage_date"],
+            nulls_last=True,
         )
-        # Keep only rows where stage_group changes within each (patient, cancer_type).
+        # Keep only rows where stage or documented metastatic distribution changes
+        # within each patient/disease/site/histology/staging-system lineage.
         # This collapses repeated identical staging entries over time — once a stage
         # is established (including metastatic/IV), subsequent rows with the same
         # stage add no new information.
@@ -407,11 +487,14 @@ def build_timeline(raw_path, timeline_path):
             key = (
                 row["DFCI_MRN"],
                 (_str(row["cancer_type"])).lower(),
+                (_str(row["histology"])).lower(),
+                (_str(row["primary_site"])).lower(),
                 (_str(row["staging_system"])).lower(),
             )
             curr = (
                 (_str(row["stage_group"])).upper(),
                 (_str(row["stage_raw"])).lower(),
+                tuple(site.casefold() for site in _string_list(row["metastatic_sites"])),
             )
             if last_stage.get(key) != curr:
                 keep_mask.append(True)

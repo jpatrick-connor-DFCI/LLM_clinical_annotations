@@ -41,7 +41,8 @@ builds the output timeline/labels).
 Parquet scans apply cohort, note-type, and task-specific candidate predicates
 before note text is materialized. Staging recognizes AJCC/base-stage, TNM, FIGO,
 Rai, Binet, Durie-Salmon, and limited/extensive-stage language and preserves the
-stated system/value plus a normalized I–IV group when applicable.
+stated system/value plus a normalized I–IV group when applicable. Each staging
+event also records explicit histology, primary site, and metastatic sites.
 
 ## Running a task
 

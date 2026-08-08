@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import polars as pl
+from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -29,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from preprocessing.config import (  # noqa: E402
     DEFAULT_DATA_PATH,
-    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    DEFAULT_ADT_MRN_CSV,
     DEFAULT_PROFILE_NOTE_PATHS,
     GLEASON_EVIDENCE_SCHEMA_VERSION,
     SNIPPET_PROFILES,
@@ -64,9 +65,9 @@ def parse_args():
     parser.add_argument(
         "--mrn-file",
         type=Path,
-        default=DEFAULT_ICD_PROSTATE_MRN_CSV,
+        default=DEFAULT_ADT_MRN_CSV,
         help="CSV cohort file containing DFCI_MRN values; defaults to the "
-             "COMPASS_PROFILE_DATA ICD prostate cohort.",
+             "COMPASS_PROFILE_DATA ADT cohort.",
     )
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,
@@ -111,6 +112,7 @@ def parse_args():
 
 
 def run(args):
+    progress = tqdm(total=4, desc="Compile Gleason evidence", unit="step", dynamic_ncols=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = args.output_dir / "gleason_evidence.parquet"
     meta_path = args.output_dir / "gleason_evidence.meta.parquet"
@@ -147,6 +149,7 @@ def run(args):
         f"Loaded notes: {len(notes_df)} rows for "
         f"{notes_df['DFCI_MRN'].n_unique()} patients"
     )
+    progress.update(1)
 
     if args.note_types and args.note_bundle_path is not None:
         notes_df = filter_note_types(notes_df, args.note_types)
@@ -160,6 +163,7 @@ def run(args):
         payload_max_chars=args.payload_max_chars,
         note_types=args.note_types,
     )
+    progress.update(1)
 
     if evidence_path.exists() and evidence_path.stat().st_size > 0:
         existing_meta = read_scan_config_meta(meta_path)
@@ -189,6 +193,8 @@ def run(args):
                 "downstream state."
             )
         print(f"Existing evidence matches current scan settings, reusing: {evidence_path}")
+        progress.update(2)
+        progress.close()
         return
 
     patient_chunks = group_patient_snippets(
@@ -198,6 +204,7 @@ def run(args):
         payload_max_chars=args.payload_max_chars,
         max_workers=args.scan_workers,
     )
+    progress.update(1)
     total_chunks = sum(len(c) for c in patient_chunks.values())
     print(
         f"Patients mentioning Gleason: {len(patient_chunks)} "
@@ -232,6 +239,8 @@ def run(args):
         evidence_schema_version=GLEASON_EVIDENCE_SCHEMA_VERSION,
         cohort_mrn_count=len(selected_mrns) if selected_mrns is not None else None,
     )
+    progress.update(1)
+    progress.close()
     print(f"Wrote Gleason evidence ({evidence.height} rows): {evidence_path}")
 
 

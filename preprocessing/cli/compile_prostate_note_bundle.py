@@ -2,12 +2,14 @@ import argparse
 import sys
 from pathlib import Path
 
+from tqdm.auto import tqdm
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import (  # noqa: E402
-    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    DEFAULT_ADT_MRN_CSV,
     DEFAULT_PROFILE_NOTE_PATHS,
     DEFAULT_OUTPUT_DIR,
     NOTE_BUNDLE_FILENAME,
@@ -42,15 +44,17 @@ def parse_args():
     parser.add_argument(
         "--mrn-file",
         type=Path,
-        default=DEFAULT_ICD_PROSTATE_MRN_CSV,
+        default=DEFAULT_ADT_MRN_CSV,
         help="CSV cohort file containing the prostate DFCI_MRN values; defaults "
-             "to the COMPASS_PROFILE_DATA ICD prostate cohort.",
+             "to the COMPASS_PROFILE_DATA ADT cohort.",
     )
     return parser.parse_args()
 
 def main():
     args = parse_args()
+    progress = tqdm(total=3, desc="Compile note bundle", unit="step", dynamic_ncols=True)
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
+    progress.update(1)
 
     parquet_paths = args.notes_parquet or DEFAULT_PROFILE_NOTE_PATHS
     if selected_mrns is None:
@@ -63,11 +67,14 @@ def main():
         bundle_path=None,
         selected_mrns=selected_mrns,
     )
+    progress.update(1)
     write_note_bundle(
         args.output_path,
         note_df,
         selected_mrns=selected_mrns,
     )
+    progress.update(1)
+    progress.close()
 
     print(f"Wrote compiled note bundle: {args.output_path}")
     print(f"Patients in bundle: {note_df['DFCI_MRN'].n_unique()}")

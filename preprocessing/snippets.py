@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import polars as pl
+from tqdm.auto import tqdm
 
 from preprocessing.config import SNIPPET_PROFILES
 from preprocessing.notes import to_iso_date
@@ -79,6 +80,7 @@ def scan_note_candidates(
     snippet_max_chars=_BINARY_NEPC_PROFILE.max_chars,
     max_workers=None,
     trigger_regex=TRIGGER_REGEX,
+    progress_desc="Scanning notes",
 ):
     """Clean + trigger-scan + snippet every note, in parallel across processes.
 
@@ -103,30 +105,43 @@ def scan_note_candidates(
         for c in results:
             candidates.setdefault(c["mrn"], []).append(c)
 
+    progress = tqdm(total=len(rows), desc=progress_desc, unit="note", dynamic_ncols=True)
     if max_workers == 1:
-        _collect(
-            _scan_note_chunk(
-                rows,
-                context_chars=context_chars,
-                snippet_max_chars=snippet_max_chars,
-                trigger_regex=trigger_regex,
-            )
-        )
+        chunk_size = min(256, len(rows))
+        try:
+            for chunk in _chunked(rows, chunk_size):
+                _collect(
+                    _scan_note_chunk(
+                        chunk,
+                        context_chars=context_chars,
+                        snippet_max_chars=snippet_max_chars,
+                        trigger_regex=trigger_regex,
+                    )
+                )
+                progress.update(len(chunk))
+        finally:
+            progress.close()
         return candidates
 
     # ~4 chunks per worker keeps the pool fed while amortizing per-task pickling.
     chunk_size = max(1, math.ceil(len(rows) / (max_workers * 4)))
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        for results in executor.map(
-            partial(
-                _scan_note_chunk,
-                context_chars=context_chars,
-                snippet_max_chars=snippet_max_chars,
-                trigger_regex=trigger_regex,
-            ),
-            _chunked(rows, chunk_size),
-        ):
-            _collect(results)
+    chunks = list(_chunked(rows, chunk_size))
+    try:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            result_batches = executor.map(
+                partial(
+                    _scan_note_chunk,
+                    context_chars=context_chars,
+                    snippet_max_chars=snippet_max_chars,
+                    trigger_regex=trigger_regex,
+                ),
+                chunks,
+            )
+            for chunk, results in zip(chunks, result_batches):
+                _collect(results)
+                progress.update(len(chunk))
+    finally:
+        progress.close()
     return candidates
 
 
@@ -138,7 +153,13 @@ def rank_patient_candidates(candidates, *, max_notes_per_patient, payload_max_ch
     budget is hit, so outlier patients can't exceed the model's context window.
     """
     ranked = {}
-    for mrn, items in candidates.items():
+    for mrn, items in tqdm(
+        candidates.items(),
+        total=len(candidates),
+        desc="Ranking patient snippets",
+        unit="patient",
+        dynamic_ncols=True,
+    ):
         items.sort(
             key=lambda c: (
                 len(c["trigger_categories"]),

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import polars as pl
 
 from preprocessing.config import (
-    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    DEFAULT_ADT_MRN_CSV,
     PROFILE_PATH_IMAGE_COLUMNS,
     PROFILE_PROGRESS_COLUMNS,
 )
@@ -50,13 +50,13 @@ def test_mrn_cohort_list_is_read_from_csv(tmp_path):
     assert load_selected_mrns(mrn_file=cohort_path) == {101, 202}
 
 
-def test_prostate_collectors_default_to_compass_profile_icd_cohort(monkeypatch):
+def test_prostate_collectors_default_to_compass_profile_adt_cohort(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["compile_patient_snippets.py"])
 
-    assert parse_snippet_args().mrn_file == DEFAULT_ICD_PROSTATE_MRN_CSV
-    assert DEFAULT_ICD_PROSTATE_MRN_CSV.name == "icd_prostate_mrn_flags.csv"
-    assert DEFAULT_ICD_PROSTATE_MRN_CSV.parent.name == "mrn_lists"
-    assert DEFAULT_ICD_PROSTATE_MRN_CSV.parents[1].name == "COMPASS_PROFILE_DATA"
+    assert parse_snippet_args().mrn_file == DEFAULT_ADT_MRN_CSV
+    assert DEFAULT_ADT_MRN_CSV.name == "adt_mrns.csv"
+    assert DEFAULT_ADT_MRN_CSV.parent.name == "mrn_lists"
+    assert DEFAULT_ADT_MRN_CSV.parents[1].name == "COMPASS_PROFILE_DATA"
 
 
 def _write_profile_note_fixtures(root: Path):

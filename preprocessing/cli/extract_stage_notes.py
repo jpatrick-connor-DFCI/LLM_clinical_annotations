@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import polars as pl
+from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -139,6 +140,7 @@ def parse_args():
 
 
 def run(args):
+    progress = tqdm(total=4, desc="Compile stage evidence", unit="step", dynamic_ncols=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = args.output_dir / "stage_evidence.parquet"
     meta_path = args.output_dir / "stage_evidence.meta.parquet"
@@ -162,6 +164,7 @@ def run(args):
         notes_df = notes_df.filter(
             pl.col("NOTE_TYPE").cast(pl.Utf8).str.to_lowercase().is_in(wanted)
         )
+    progress.update(1)
     scan_config = evidence_scan_config_key(
         notes_df,
         STAGE_TRIGGER_REGEX,
@@ -170,6 +173,7 @@ def run(args):
         payload_max_chars=60_000,
         note_types=args.note_types,
     )
+    progress.update(1)
     if evidence_path.exists() and evidence_path.stat().st_size > 0:
         existing = read_scan_config_meta(meta_path)
         if (
@@ -178,12 +182,15 @@ def run(args):
             and existing.get("evidence_sha256") == file_sha256(evidence_path)
         ):
             print(f"Existing stage evidence matches current inputs: {evidence_path}")
+            progress.update(2)
+            progress.close()
             return
         raise ValueError("Stage evidence inputs changed; re-run with --overwrite.")
 
     records = list(iter_note_snippets(
         notes_df, STAGE_TRIGGER_REGEX, context_chars=args.context_chars
     ))
+    progress.update(1)
     if args.note_types and not direct_parquet:
         wanted = {t.strip().lower() for t in args.note_types}
         before = len(records)
@@ -205,6 +212,8 @@ def run(args):
         note_types=args.note_types,
         evidence_sha256=file_sha256(evidence_path),
     )
+    progress.update(1)
+    progress.close()
     n = evidence_df.height
 
     n_patients = evidence_df["DFCI_MRN"].n_unique() if not evidence_df.is_empty() else 0

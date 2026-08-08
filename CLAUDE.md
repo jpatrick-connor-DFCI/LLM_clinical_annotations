@@ -128,7 +128,7 @@ failed rows, raw findings, and final timelines/labels. JSON is restricted to
 provider request/response payloads and serialized audit values inside Parquet.
 Externally supplied MRN cohort lists are CSV inputs and are not pipeline artifacts.
 The prostate-specific collectors default to
-`$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; cancer stage
+`$COMPASS_PROFILE_DATA_PATH/mrn_lists/adt_mrns.csv`; cancer stage
 remains pan-cancer unless an MRN restriction is supplied.
 
 ### Snippet sizing

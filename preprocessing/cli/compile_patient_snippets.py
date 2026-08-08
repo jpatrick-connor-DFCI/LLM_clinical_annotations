@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from tqdm.auto import tqdm
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -13,7 +15,7 @@ from preprocessing.bundles.snippet_bundle import (  # noqa: E402
     write_snippet_bundle,
 )
 from preprocessing.config import (  # noqa: E402
-    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    DEFAULT_ADT_MRN_CSV,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PROFILE_NOTE_PATHS,
     SNIPPET_PROFILES,
@@ -40,9 +42,9 @@ def parse_args():
     parser.add_argument(
         "--mrn-file",
         type=Path,
-        default=DEFAULT_ICD_PROSTATE_MRN_CSV,
+        default=DEFAULT_ADT_MRN_CSV,
         help="CSV cohort file containing DFCI_MRN values; defaults to the "
-             "COMPASS_PROFILE_DATA ICD prostate cohort.",
+             "COMPASS_PROFILE_DATA ADT cohort.",
     )
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,
@@ -75,6 +77,7 @@ def parse_args():
 
 
 def run(args):
+    progress = tqdm(total=4, desc="Compile binary snippets", unit="step", dynamic_ncols=True)
     if args.output_path.exists() and not args.overwrite:
         raise FileExistsError(
             f"Patient snippet bundle already exists: {args.output_path}. "
@@ -96,6 +99,7 @@ def run(args):
         parquet_paths=parquet_paths,
         bundle_path=args.note_bundle_path,
     )
+    progress.update(1)
     print(f"Note source: {source_label} ({source_path})")
 
     notes_df = load_notes(
@@ -112,6 +116,7 @@ def run(args):
     all_mrns = set(selected_mrns) if selected_mrns is not None else patients_with_notes
     no_note_mrns = all_mrns - patients_with_notes
     print(f"Loaded notes: {len(notes_df)} rows for {len(all_mrns)} patients")
+    progress.update(1)
 
     patient_snippets = build_patient_snippets(
         notes_df,
@@ -121,6 +126,7 @@ def run(args):
         payload_max_chars=_PROFILE.payload_max_chars,
         max_workers=args.scan_workers,
     )
+    progress.update(1)
     write_snippet_bundle(
         args.output_path,
         all_mrns=all_mrns,
@@ -134,6 +140,8 @@ def run(args):
             "no_note_mrns": sorted(no_note_mrns),
         },
     )
+    progress.update(1)
+    progress.close()
 
     print(f"Wrote patient snippet bundle: {args.output_path}")
     print(f"Patients with triggered snippets: {len(patient_snippets)}")

@@ -13,6 +13,7 @@ from datetime import datetime
 
 import polars as pl
 from dateutil import parser as date_parser
+from tqdm.auto import tqdm
 
 from preprocessing.config import SNIPPET_PROFILES
 from preprocessing.notes import to_iso_date
@@ -269,11 +270,22 @@ def group_patient_snippets(
     )
 
     by_mrn = {}
-    for rec in dedupe_candidates(candidates):
+    for rec in tqdm(
+        dedupe_candidates(candidates),
+        desc="Deduplicating evidence",
+        unit="snippet",
+        dynamic_ncols=True,
+    ):
         by_mrn.setdefault(rec["DFCI_MRN"], []).append(rec)
 
     patient_chunks = {}
-    for mrn, recs in by_mrn.items():
+    for mrn, recs in tqdm(
+        by_mrn.items(),
+        total=len(by_mrn),
+        desc="Packing patient chunks",
+        unit="patient",
+        dynamic_ncols=True,
+    ):
         # Tiebreaker on `snippet` after note_date: chunk_index is a stage-2 resume
         # key (build_nepc_timeline.py), so sort order must be stable regardless of
         # scan parallelism / worker count or dict/hash-order variation across runs.

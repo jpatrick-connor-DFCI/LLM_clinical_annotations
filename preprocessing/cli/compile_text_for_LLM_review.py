@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import polars as pl
+from tqdm.auto import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -10,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from preprocessing.config import DEFAULT_PROFILE_NOTE_PATHS  # noqa: E402
 from preprocessing.notes import load_profile_notes  # noqa: E402
+from preprocessing.parquet_io import write_parquet_atomic  # noqa: E402
 
 # Note window (days) kept around the platinum start date for LLM review.
 NOTE_WINDOW_DAYS = 90
@@ -21,8 +23,10 @@ DATA_PATH = os.environ.get(
     'LLM_ANNOTATIONS_DATA_PATH',
     os.environ.get('CAIA_COMPASS_DATA_PATH', '/data/gusev/USERS/jpconnor/data/LLM_annotations/'),
 )
+progress = tqdm(total=4, desc="Compile LLM review text", unit="step", dynamic_ncols=True)
 baca_path = os.path.join(DATA_PATH, 'baca_lab_patient_annotations.parquet')
 baca_df = pl.read_parquet(baca_path)
+progress.update(1)
 if INDICATION_COL not in baca_df.columns:
     raise KeyError(
         f"Expected column {INDICATION_COL!r} in {baca_path}; "
@@ -35,6 +39,7 @@ candidate_patients = baca_df.filter(pl.col(INDICATION_COL).is_null()).select(
 selected_mrns = set(
     candidate_patients['DFCI_MRN'].cast(pl.Int64, strict=False).drop_nulls().to_list()
 )
+progress.update(1)
 text_df = load_profile_notes(DEFAULT_PROFILE_NOTE_PATHS, selected_mrns).lazy()
 candidate_LLM_text_df = (
     text_df.join(candidate_patients.lazy(), on='DFCI_MRN', how='inner')
@@ -50,7 +55,10 @@ candidate_LLM_text_df = (
     .sort(['DFCI_MRN', 'EVENT_DATE'])
     .collect()
 )
-candidate_LLM_text_df.write_parquet(
+progress.update(1)
+write_parquet_atomic(
+    candidate_LLM_text_df,
     os.path.join(DATA_PATH, 'LLM_candidate_text_data.parquet'),
-    compression='zstd',
 )
+progress.update(1)
+progress.close()

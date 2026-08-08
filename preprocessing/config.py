@@ -30,8 +30,8 @@ COMPASS_PROFILE_DATA_PATH = Path(
         "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/",
     )
 )
-DEFAULT_ICD_PROSTATE_MRN_CSV = (
-    COMPASS_PROFILE_DATA_PATH / "mrn_lists" / "icd_prostate_mrn_flags.csv"
+DEFAULT_ADT_MRN_CSV = (
+    COMPASS_PROFILE_DATA_PATH / "mrn_lists" / "adt_mrns.csv"
 )
 PROFILE_NOTES_PATH = PROFILE_DATA_PATH / "CLINICAL_NOTES"
 DEFAULT_PROFILE_NOTE_PATHS = tuple(

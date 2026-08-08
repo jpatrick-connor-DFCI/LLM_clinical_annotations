@@ -38,6 +38,9 @@ independent — scans notes, writes an evidence/snippet artifact) followed by a
 **task runner** (provider-flagged — reads that artifact, makes the LLM calls,
 builds the output timeline/labels).
 
+Compilation commands expose nested progress bars for overall steps, per-note
+trigger scanning, evidence deduplication, patient ranking, and chunk packing.
+
 Parquet scans apply cohort, note-type, and task-specific candidate predicates
 before note text is materialized. Staging recognizes AJCC/base-stage, TNM, FIGO,
 Rai, Binet, Durie-Salmon, and limited/extensive-stage language and preserves the
@@ -68,7 +71,7 @@ Every preprocessing CLI and task runner supports `--help`.
 
 The binary NEPC, Gleason, and longitudinal AVPC/NEPC collectors are
 prostate-specific. Their default cohort is
-`$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; `--mrns` or
+`$COMPASS_PROFILE_DATA_PATH/mrn_lists/adt_mrns.csv`; `--mrns` or
 `--mrn-file` can override it. Only the cancer-stage collector defaults to the
 full pan-cancer cohort.
 
@@ -118,7 +121,7 @@ Raw clinical text and every pipeline-owned evidence, state, metadata, failure,
 and result artifact are stored as Zstandard-compressed Parquet. JSON remains
 only as the LLM wire format or as a value inside a Parquet audit column.
 The default MRN cohort is
-`$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; externally
+`$COMPASS_PROFILE_DATA_PATH/mrn_lists/adt_mrns.csv`; externally
 supplied overrides also use CSV with a `DFCI_MRN` column.
 
 The native PROFILE text rows are consumed exactly as emitted by

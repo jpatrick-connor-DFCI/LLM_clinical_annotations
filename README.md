@@ -1,9 +1,9 @@
 # LLM clinical annotations
 
-LLM-based extraction of structured clinical annotations (NEPC status, cancer
-stage, Gleason score, AVPC/NEPC criteria timelines) from prostate cancer
-clinical notes, runnable against either DFCI Azure OpenAI or Google Vertex AI
-(Gemini) as the LLM backend.
+LLM-based extraction of structured clinical annotations (NEPC status, pan-cancer
+stage, Gleason score, AVPC/NEPC criteria timelines) from merged PROFILE_DATA
+clinical-note parquets, runnable against either DFCI Azure OpenAI or Google
+Vertex AI (Gemini) as the LLM backend.
 
 ## Layout
 
@@ -38,6 +38,11 @@ independent — scans notes, writes an evidence/snippet artifact) followed by a
 **task runner** (provider-flagged — reads that artifact, makes the LLM calls,
 builds the output timeline/labels).
 
+Parquet scans apply cohort, note-type, and task-specific candidate predicates
+before note text is materialized. Staging recognizes AJCC/base-stage, TNM, FIGO,
+Rai, Binet, Durie-Salmon, and limited/extensive-stage language and preserves the
+stated system/value plus a normalized I–IV group when applicable.
+
 ## Running a task
 
 The easiest entry point is the matching notebook in `notebooks/`: set the
@@ -47,17 +52,25 @@ need, and run top to bottom.
 To run from the command line instead:
 
 ```bash
-# 1. Preprocessing (provider-independent)
-python preprocessing/cli/compile_prostate_notes.py --output-path /path/to/notes.csv
-python preprocessing/cli/compile_patient_snippets.py --output-path /path/to/snippets.json.gz
+# 1. Preprocessing (provider-independent). By default this reads
+# PROFILE_DATA/CLINICAL_NOTES/{PATHOLOGY,IMAGING,PROGRESS}_NOTES.parquet.
+python preprocessing/cli/compile_patient_snippets.py \
+    --mrn-file /path/to/prostate_mrns.parquet \
+    --output-path /path/to/snippets.parquet
 
 # 2. Task runner (provider-flagged)
 python tasks/binary_NEPC/run_NEPC_classifier.py \
-    --snippets-path /path/to/snippets.json.gz \
+    --snippets-path /path/to/snippets.parquet \
     --provider dfci_gpt   # or vertex_ai
 ```
 
 Every preprocessing CLI and task runner supports `--help`.
+
+The binary NEPC, Gleason, and longitudinal AVPC/NEPC collectors are
+prostate-specific. Direct PROFILE_DATA parquet runs therefore require
+`--mrns` or `--mrn-file`; only the cancer-stage collector defaults to the full
+pan-cancer cohort. A precompiled prostate Parquet file or note bundle remains usable
+without repeating the cohort argument.
 
 ### Longitudinal AVPC/NEPC
 
@@ -72,12 +85,12 @@ Resume state is bound to the evidence content, provider, model, prompt text,
 and output schema. If any of these change, rerun stage 1 and/or stage 2 with
 `--overwrite` as instructed by the CLI rather than mixing incompatible runs.
 Grounded items that fail validation are quarantined in
-`avpc_nepc_rejected_findings.tsv`; affected successful rows use the
+`avpc_nepc_rejected_findings.parquet`; affected successful rows use the
 `ok_with_rejections` status so partial results remain visible and auditable.
 
 ```bash
 python preprocessing/cli/collect_nepc_notes.py \
-    --notes-csv /path/to/prostate_text_data.csv \
+    --mrn-file /path/to/prostate_mrns.parquet \
     --output-dir /path/to/avpc_nepc
 
 python tasks/longitudinal_NEPC/build_nepc_timeline.py \
@@ -96,3 +109,22 @@ pip install -e ".[vertex_ai]"       # + google-genai
 `dfci_gpt` authenticates via `DefaultAzureCredential` (Azure AD). `vertex_ai`
 authenticates via Google Application Default Credentials and reads
 `VERTEX_PROJECT` / `VERTEX_LOCATION` from the environment.
+
+Set `PROFILE_DATA_PATH` to override the default
+`/data/gusev/USERS/jpconnor/data/PROFILE_DATA/` root. Each preprocessing CLI
+also accepts repeated `--notes-parquet` arguments for explicit file overrides.
+Raw clinical text and every pipeline-owned evidence, state, metadata, failure,
+and result artifact are stored as Zstandard-compressed Parquet. JSON remains
+only as the LLM wire format or as a value inside a Parquet audit column.
+
+The native PROFILE text rows are consumed exactly as emitted by
+`PROFILE_data_processing`. Pathology and imaging Parquets contain
+`RPT_ID`, `DFCI_MRN`, `EVENT_DATE`, `PROC_DESC`, `RPT_TYPE`, `RPT_TEXT`, and
+`FILE`; progress-note Parquets contain `RPT_ID`, `DFCI_MRN`, `EVENT_DATE`,
+`INP_RPT_TYPE`, `PROVIDER_TYPE`, `ENCOUNTER_TYPE_DESC`, `RPT_TEXT`, and `FILE`.
+Upstream processing has already merged `NARRATIVE_TEXT` into `RPT_TEXT`, so the
+loader treats `RPT_TEXT` as the complete canonical note body.
+
+Staging and binary NEPC resume state is fingerprinted against evidence/snippet
+content, provider, model, prompts, and output schemas. Binary output uses
+`review_status` to distinguish `llm_classified`, `no_trigger`, and `no_notes`.

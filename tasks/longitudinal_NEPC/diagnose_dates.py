@@ -1,6 +1,6 @@
 """Read-only diagnostic for the longitudinal_NEPC date-reproducibility bug (Phase 2).
 
-Reads avpc_nepc_extractions_raw.tsv / avpc_nepc_timeline.tsv from an existing
+Reads avpc_nepc_extractions_raw.parquet / avpc_nepc_timeline.parquet from an existing
 --output-dir and reports statistics needed to decide whether the to_iso_date /
 resolve_date reproducibility bug (fixed by parse_stated_date in
 preprocessing/longitudinal.py) actually mattered in practice. Writes nothing;
@@ -31,10 +31,10 @@ _FULL_ISO_RE_SOURCE = r"^\d{4}-\d{2}-\d{2}$"
 _SANITY_MIN_YEAR = 1990
 
 
-def _read_tsv(path):
+def _read_parquet(path):
     if not path.exists() or path.stat().st_size == 0:
         return None
-    return pl.read_csv(path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
+    return pl.read_parquet(path)
 
 
 def blast_radius(raw, date_col):
@@ -154,11 +154,11 @@ def copy_forward_fraction(timeline):
 
 
 def run(args):
-    raw = _read_tsv(args.output_dir / "avpc_nepc_extractions_raw.tsv")
-    timeline = _read_tsv(args.output_dir / "avpc_nepc_timeline.tsv")
+    raw = _read_parquet(args.output_dir / "avpc_nepc_extractions_raw.parquet")
+    timeline = _read_parquet(args.output_dir / "avpc_nepc_timeline.parquet")
 
     if raw is None and timeline is None:
-        print(f"No avpc_nepc_extractions_raw.tsv / avpc_nepc_timeline.tsv found under {args.output_dir}")
+        print(f"No AVPC/NEPC raw or timeline Parquet found under {args.output_dir}")
         print("Nothing to diagnose against real data. Run against a synthetic fixture instead,")
         print("or point --output-dir at a real pipeline run's output directory.")
         return
@@ -178,7 +178,7 @@ def run(args):
                 f"  ({result['frac_not_full_iso']:.1%})"
             )
     else:
-        print("\n[1] Blast radius — SKIPPED (avpc_nepc_extractions_raw.tsv not found)")
+        print("\n[1] Blast radius — SKIPPED (raw Parquet not found)")
 
     if timeline is not None:
         print("\n[2] date_source / date_precision distribution")
@@ -199,7 +199,7 @@ def run(args):
             rate_str = f"{rate:.1%}" if rate is not None else "n/a"
             print(f"      {crit}: n={stats['n']} n_null={stats['n_null']} rate={rate_str}")
     else:
-        print("\n[2]/[3] SKIPPED (avpc_nepc_timeline.tsv not found)")
+        print("\n[2]/[3] SKIPPED (timeline Parquet not found)")
 
     if raw is not None:
         print("\n[4] diagnosis_date - source_note_date (days)")
@@ -223,7 +223,7 @@ def run(args):
             f"  post-today={bounds['n_post_today']}"
         )
     else:
-        print("\n[4]/[5] SKIPPED (avpc_nepc_extractions_raw.tsv not found)")
+        print("\n[4]/[5] SKIPPED (raw Parquet not found)")
 
     if timeline is not None:
         print("\n[6] Copy-forward note_date fallback fraction")
@@ -236,7 +236,7 @@ def run(args):
                 f"  ({cf['frac_note_date_fallback']:.1%})"
             )
     else:
-        print("\n[6] SKIPPED (avpc_nepc_timeline.tsv not found)")
+        print("\n[6] SKIPPED (timeline Parquet not found)")
 
     print()
 
@@ -244,7 +244,7 @@ def run(args):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
-                         help="Directory containing avpc_nepc_extractions_raw.tsv / avpc_nepc_timeline.tsv")
+                         help="Directory containing AVPC/NEPC raw/timeline Parquet artifacts")
     return parser.parse_args()
 
 

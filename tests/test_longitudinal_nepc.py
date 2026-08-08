@@ -4,8 +4,8 @@ from argparse import Namespace
 import polars as pl
 import pytest
 
-from preprocessing.longitudinal import group_patient_snippets
-from preprocessing.longitudinal import file_sha256
+from preprocessing.config import LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
+from preprocessing.longitudinal import file_sha256, group_patient_snippets, write_scan_config_meta
 from preprocessing.triggers import TRIGGER_REGEX, find_trigger_matches
 from tasks.longitudinal_NEPC import build_nepc_timeline as nepc
 from tasks.longitudinal_NEPC.prompts import (
@@ -84,8 +84,8 @@ def test_extraction_fingerprint_changes_with_model():
 
 
 def test_custom_evidence_uses_adjacent_metadata(tmp_path):
-    evidence = tmp_path / "custom.tsv"
-    assert nepc._meta_path_for_evidence(evidence) == tmp_path / "custom.meta.json"
+    evidence = tmp_path / "custom.parquet"
+    assert nepc._meta_path_for_evidence(evidence) == tmp_path / "custom.meta.parquet"
 
 
 def test_sparse_chunk_indices_are_preserved_and_fractional_indices_rejected():
@@ -389,8 +389,8 @@ def test_patient_synthesis_receives_all_sparse_chunk_maps():
 
 
 def test_raw_is_rebuilt_from_latest_successful_patient_synthesis(tmp_path):
-    processed = tmp_path / "processed.tsv"
-    raw = tmp_path / "raw.tsv"
+    processed = tmp_path / "processed.parquet"
+    raw = tmp_path / "raw.parquet"
     result = {
         "criteria_found": [
             {
@@ -422,15 +422,15 @@ def test_raw_is_rebuilt_from_latest_successful_patient_synthesis(tmp_path):
         nepc.PROCESSED_COLUMNS,
     )
     assert nepc.rebuild_raw_from_processed(processed, raw, "run", {123: _chunks()}) == 1
-    output = pl.read_csv(raw, separator="\t", infer_schema_length=0)
+    output = pl.read_parquet(raw)
     assert output.height == 1
     assert output["criterion"].to_list() == ["C5"]
-    assert output["chunk_index"].to_list() == ["2"]
+    assert output["chunk_index"].to_list() == [2]
 
 
 def test_same_day_events_share_complete_cumulative_count(tmp_path):
-    raw = tmp_path / "raw.tsv"
-    timeline = tmp_path / "timeline.tsv"
+    raw = tmp_path / "raw.parquet"
+    timeline = tmp_path / "timeline.parquet"
     rows = []
     for criterion in ("C1", "C3"):
         rows.append(
@@ -448,7 +448,7 @@ def test_same_day_events_share_complete_cumulative_count(tmp_path):
         )
     nepc._write_rows_atomic(raw, rows, nepc.RAW_COLUMNS)
     assert nepc.build_timeline(raw, timeline) == 2
-    output = pl.read_csv(timeline, separator="\t")
+    output = pl.read_parquet(timeline)
     assert output["num_criteria_to_date"].to_list() == [2, 2]
 
 
@@ -472,8 +472,8 @@ def test_payload_budget_smaller_than_snippet_cap_is_rejected():
 
 
 def test_end_to_end_resume_and_model_guard(tmp_path, monkeypatch):
-    evidence = tmp_path / "avpc_nepc_evidence.tsv"
-    meta = tmp_path / "avpc_nepc_evidence.meta.json"
+    evidence = tmp_path / "avpc_nepc_evidence.parquet"
+    meta = tmp_path / "avpc_nepc_evidence.meta.parquet"
     pl.DataFrame(
         {
             "DFCI_MRN": [123, 123],
@@ -485,15 +485,12 @@ def test_end_to_end_resume_and_model_guard(tmp_path, monkeypatch):
                 "Bone scan demonstrates at least 24 osseous metastases.",
             ],
         }
-    ).write_csv(evidence, separator="\t")
-    meta.write_text(
-        json.dumps(
-            {
-                "scan_config": "scan-1",
-                "evidence_sha256": file_sha256(evidence),
-            }
-        ),
-        encoding="utf-8",
+    ).write_parquet(evidence)
+    write_scan_config_meta(
+        meta,
+        "scan-1",
+        evidence_sha256=file_sha256(evidence),
+        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
     )
 
     class Provider:
@@ -567,13 +564,9 @@ def test_end_to_end_resume_and_model_guard(tmp_path, monkeypatch):
     )
     nepc.run(args)
     assert provider.calls == 3  # two maps + one patient synthesis
-    assert pl.read_csv(tmp_path / "avpc_nepc_extractions_raw.tsv", separator="\t").height == 1
-    processed = pl.read_csv(
-        tmp_path / "avpc_nepc_processed_patients.tsv",
-        separator="\t",
-        infer_schema_length=0,
-    )
-    assert processed["num_criteria"].to_list() == ["1"]
+    assert pl.read_parquet(tmp_path / "avpc_nepc_extractions_raw.parquet").height == 1
+    processed = pl.read_parquet(tmp_path / "avpc_nepc_processed_patients.parquet")
+    assert processed["num_criteria"].to_list() == [1]
 
     nepc.run(args)
     assert provider.calls == 3
@@ -582,15 +575,28 @@ def test_end_to_end_resume_and_model_guard(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Provider, model, prompt"):
         nepc.run(changed)
 
-    evidence.write_text(evidence.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    pl.concat(
+        [
+            pl.read_parquet(evidence),
+            pl.DataFrame(
+                {
+                    "DFCI_MRN": [999],
+                    "chunk_index": [0],
+                    "note_date": ["2021-01-01"],
+                    "note_type": ["Clinical"],
+                    "snippet": ["changed evidence"],
+                }
+            ),
+        ]
+    ).write_parquet(evidence)
     with pytest.raises(ValueError, match="Evidence content"):
         nepc.run(args)
 
 
 def test_dropped_findings_are_counted_in_the_processed_log(tmp_path, monkeypatch):
     """A rejected finding must be visible as num_dropped, not silently vanish."""
-    evidence = tmp_path / "avpc_nepc_evidence.tsv"
-    meta = tmp_path / "avpc_nepc_evidence.meta.json"
+    evidence = tmp_path / "avpc_nepc_evidence.parquet"
+    meta = tmp_path / "avpc_nepc_evidence.meta.parquet"
     pl.DataFrame(
         {
             "DFCI_MRN": [123],
@@ -599,10 +605,12 @@ def test_dropped_findings_are_counted_in_the_processed_log(tmp_path, monkeypatch
             "note_type": ["Labs"],
             "snippet": ["At progression PSA was 7.2 ng/mL."],
         }
-    ).write_csv(evidence, separator="\t")
-    meta.write_text(
-        json.dumps({"scan_config": "scan-1", "evidence_sha256": file_sha256(evidence)}),
-        encoding="utf-8",
+    ).write_parquet(evidence)
+    write_scan_config_meta(
+        meta,
+        "scan-1",
+        evidence_sha256=file_sha256(evidence),
+        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
     )
 
     class Provider:
@@ -658,18 +666,12 @@ def test_dropped_findings_are_counted_in_the_processed_log(tmp_path, monkeypatch
             overwrite=False,
         )
     )
-    processed = pl.read_csv(
-        tmp_path / "avpc_nepc_processed_patients.tsv", separator="\t", infer_schema_length=0
-    )
-    assert processed["num_criteria"].to_list() == ["1"]
-    assert processed["num_dropped"].to_list() == ["1"]
+    processed = pl.read_parquet(tmp_path / "avpc_nepc_processed_patients.parquet")
+    assert processed["num_criteria"].to_list() == [1]
+    assert processed["num_dropped"].to_list() == [1]
     assert processed["status"].to_list() == ["ok_with_rejections"]
 
-    rejected = pl.read_csv(
-        tmp_path / "avpc_nepc_rejected_findings.tsv",
-        separator="\t",
-        infer_schema_length=0,
-    )
+    rejected = pl.read_parquet(tmp_path / "avpc_nepc_rejected_findings.parquet")
     assert rejected.height == 1
     assert rejected["stage"].to_list() == ["synthesis"]
     assert rejected["reason"].to_list() == ["quote_or_source_not_in_evidence"]

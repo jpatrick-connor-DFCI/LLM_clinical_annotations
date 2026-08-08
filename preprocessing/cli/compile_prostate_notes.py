@@ -1,21 +1,18 @@
 """Standalone prostate note extractor.
 
-Extracts every available clinical note for a prostate MRN list from the raw
-OncDRS clinical-text sources and writes a single `prostate_text_data.csv`, which
-is the default note source for all downstream LLM pipelines (NEPC classifier,
-Gleason timeline, AVPC/NEPC criteria timeline).
+Selects clinical notes for a prostate MRN list from the merged PROFILE_DATA
+parquets and writes a `prostate_text_data.parquet` artifact.
 
 The default cohort source is the COMPASS prostate survival cohort file. The
 `DFCI_MRN` column from that file defines which patients are included when no
 explicit MRN list is supplied.
-Raw note extraction streams the source JSONs via `ijson` when available.
 
 Examples
 --------
 # Extract notes for an explicit MRN list
-python preprocessing/cli/compile_prostate_notes.py --mrn-file prostate_mrns.txt
+python preprocessing/cli/compile_prostate_notes.py --mrn-file prostate_mrns.parquet
 
-# Run with defaults: read MRNs from the COMPASS prostate survival cohort, then extract raw OncDRS notes
+# Run with defaults: read cohort MRNs, then select their PROFILE_DATA notes
 python preprocessing/cli/compile_prostate_notes.py
 """
 
@@ -29,17 +26,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from preprocessing.config import PROSTATE_TEXT_CSV  # noqa: E402
+from preprocessing.config import DEFAULT_PROFILE_NOTE_PATHS, PROSTATE_TEXT_PARQUET  # noqa: E402
 from preprocessing.notes import (  # noqa: E402
-    load_raw_text_notes,
+    load_profile_notes,
     load_selected_mrns,
     parse_mrn_values,
-    resolve_raw_text_paths,
-    write_notes_csv,
+    write_notes_parquet,
 )
 
 DEFAULT_PROSTATE_MRN_SOURCE = Path(
-    "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/prostate_arpi_survival_cohort.csv"
+    "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/prostate_arpi_survival_cohort.parquet"
 )
 
 
@@ -47,22 +43,23 @@ def derive_prostate_mrns(cohort_source):
     cohort_source = Path(cohort_source)
     if not cohort_source.exists():
         raise FileNotFoundError(f"Cohort source not found: {cohort_source}")
-    cohort = pl.scan_csv(cohort_source).select("DFCI_MRN").collect()
+    if cohort_source.suffix.lower() != ".parquet":
+        raise ValueError(f"Cohort source must be Parquet: {cohort_source}")
+    cohort = pl.scan_parquet(cohort_source).select("DFCI_MRN").collect()
     return parse_mrn_values(cohort["DFCI_MRN"].to_list())
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Extract raw OncDRS notes into prostate_text_data.csv. By default, "
-        "the cohort MRNs are read from the COMPASS prostate survival cohort file, "
-        "and note JSONs are streamed with ijson when available."
+        description="Select PROFILE_DATA notes into prostate_text_data.parquet. "
+        "By default, cohort MRNs come from the COMPASS prostate survival cohort."
     )
     parser.add_argument("--mrns", default=None, help="Comma-separated DFCI_MRN values to include.")
     parser.add_argument(
         "--mrn-file",
         type=Path,
         default=None,
-        help="Text/CSV/TSV file with the prostate DFCI_MRN values to compile.",
+        help="Parquet file with the prostate DFCI_MRN values to compile.",
     )
     parser.add_argument(
         "--derive-prostate-mrns",
@@ -74,20 +71,21 @@ def parse_args():
         "--cohort-source",
         type=Path,
         default=DEFAULT_PROSTATE_MRN_SOURCE,
-        help="CSV source whose DFCI_MRN column defines the default prostate cohort.",
+        help="Parquet source whose DFCI_MRN column defines the default prostate cohort.",
     )
     parser.add_argument(
-        "--raw-text-path",
+        "--notes-parquet",
         type=Path,
         action="append",
         default=None,
-        help="Raw OncDRS note directory. Repeat to search multiple directories.",
+        help="PROFILE_DATA clinical-note parquet. Repeat for multiple files; defaults "
+        "to pathology, imaging, and progress notes.",
     )
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=PROSTATE_TEXT_CSV,
-        help="Destination CSV (default: the shared prostate_text_data.csv).",
+        default=PROSTATE_TEXT_PARQUET,
+        help="Destination Parquet (default: the shared prostate_text_data.parquet).",
     )
     return parser.parse_args()
 
@@ -105,16 +103,16 @@ def main():
             "cohort-source MRN inference run from --cohort-source."
         )
 
-    raw_text_paths = resolve_raw_text_paths(args.raw_text_path)
-    note_df = load_raw_text_notes(raw_text_paths, selected_mrns)
-    standardized = write_notes_csv(args.output_path, note_df)
+    parquet_paths = args.notes_parquet or DEFAULT_PROFILE_NOTE_PATHS
+    note_df = load_profile_notes(parquet_paths, selected_mrns)
+    standardized = write_notes_parquet(args.output_path, note_df)
 
-    print(f"Wrote prostate notes CSV: {args.output_path}")
+    print(f"Wrote prostate notes Parquet: {args.output_path}")
     print(f"Cohort MRNs requested: {len(selected_mrns)}")
     print(f"Patients with notes: {standardized['DFCI_MRN'].n_unique()}")
     print(f"Notes written: {len(standardized)}")
     print(f"Cohort source used: {args.cohort_source}")
-    print(f"Raw text directories searched: {', '.join(str(p) for p in raw_text_paths)}")
+    print(f"PROFILE_DATA parquets read: {', '.join(str(p) for p in parquet_paths)}")
 
 
 if __name__ == "__main__":

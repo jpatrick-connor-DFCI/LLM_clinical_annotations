@@ -1,16 +1,17 @@
 """Per-note scanning and per-patient ranking/packing of trigger snippets."""
 
-import gzip
 import hashlib
-import json
 import math
 import os
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
 
+import polars as pl
+
 from preprocessing.config import SNIPPET_PROFILES
 from preprocessing.notes import to_iso_date
+from preprocessing.parquet_io import write_parquet_atomic
 from preprocessing.triggers import TRIGGER_REGEX, build_snippet, find_trigger_matches
 from preprocessing.utils import clean_note
 
@@ -24,9 +25,9 @@ def _scan_note_row(row, *, context_chars, snippet_max_chars, trigger_regex=TRIGG
     usable text or no trigger hit. Module-level so it can be pickled by a
     ProcessPoolExecutor worker.
     """
-    raw_text = row.get("CLINICAL_TEXT") or ""
+    note_text = row.get("CLINICAL_TEXT") or ""
     note_type = row.get("NOTE_TYPE") or "Unknown"
-    cleaned = clean_note(raw_text, note_type=note_type)
+    cleaned = clean_note(note_text, note_type=note_type)
     if not cleaned:
         return None
     matches = find_trigger_matches(cleaned, trigger_regex)
@@ -226,13 +227,22 @@ def build_patient_snippets(
             payload_max_chars=payload_max_chars,
             context_chars=context_chars,
         )
-        cache_path = cache_dir / f"patient_snippets_{key}.json.gz"
+        cache_path = cache_dir / f"patient_snippets_{key}.parquet"
         if cache_path.exists():
             try:
-                with gzip.open(cache_path, "rt", encoding="utf-8") as handle:
-                    cached = json.load(handle)
-                return {int(mrn): snippets for mrn, snippets in cached.items()}
-            except (OSError, json.JSONDecodeError, ValueError):
+                cached = pl.read_parquet(cache_path).sort(["DFCI_MRN", "snippet_index"])
+                grouped = {}
+                for row in cached.iter_rows(named=True):
+                    grouped.setdefault(int(row["DFCI_MRN"]), []).append(
+                        {
+                            "note_date": row["note_date"],
+                            "note_type": row["note_type"],
+                            "trigger_categories": row["trigger_categories"] or [],
+                            "snippet": row["snippet"],
+                        }
+                    )
+                return grouped
+            except (OSError, pl.exceptions.PolarsError, ValueError):
                 pass  # corrupt/partial cache — fall through and recompute
 
     candidates = scan_note_candidates(
@@ -248,10 +258,17 @@ def build_patient_snippets(
     )
 
     if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
-        with gzip.open(tmp_path, "wt", encoding="utf-8") as handle:
-            json.dump({str(mrn): snippets for mrn, snippets in ranked.items()}, handle)
-        tmp_path.replace(cache_path)  # atomic: never leave a half-written cache
+        rows = []
+        for mrn, snippets in ranked.items():
+            for snippet_index, snippet in enumerate(snippets):
+                rows.append(
+                    {
+                        "DFCI_MRN": int(mrn),
+                        "snippet_index": snippet_index,
+                        **snippet,
+                    }
+                )
+        if rows:
+            write_parquet_atomic(pl.DataFrame(rows, strict=False), cache_path)
 
     return ranked

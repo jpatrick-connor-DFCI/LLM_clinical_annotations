@@ -16,7 +16,7 @@ TRIGGER_REGEX = {
         r"transform(?:ation|ed|ing)(?:\s+(?:to|into))?|"
         r"transdifferentiat(?:e|ed|ion|ing)|dedifferentiat(?:e|ed|ion|ing)|"
         r"lineage\s+plasticity|treatment[\s-]?emergent\s+neuroendocrine|"
-        r"synaptophysin|chromogranin(?:\s+a)?|cd56|neuron[- ]specific\s+enolase|nse"
+        r"synaptophysin|chromogranin(?:\s+a)?|cd56|insm1|neuron[- ]specific\s+enolase|nse"
         r")\b"
     ),
     "avpc": (
@@ -47,7 +47,8 @@ TRIGGER_REGEX = {
     ),
     "biomarker": (
         r"\b(?:"
-        r"brca1|brca2|atm|cdk12|palb2|"
+        r"brca1|brca2|atm|cdk12|palb2|pten|tp53|rb1|spop|"
+        r"androgen\s+receptor|ar[- ]?v7|ar\s+(?:amplification|mutation|variant)|"
         r"hrd|hrr|ddr|homologous\s+recombination|dna\s+damage\s+repair|"
         r"msi[- ]h(?:igh)?|mmr|mismatch\s+repair|msh2|msh6|mlh1|pms2|"
         r"tumor\s+mutational\s+burden|tmb"
@@ -75,6 +76,11 @@ TRIGGER_REGEX = {
         r")\b"
     ),
 }
+
+
+def combined_text_pattern(trigger_regex):
+    """Build one case-insensitive parquet candidate regex from labeled patterns."""
+    return "(?i)(?:" + "|".join(trigger_regex.values()) + ")"
 
 
 def merge_windows(windows, gap_chars=SNIPPET_GAP_CHARS):

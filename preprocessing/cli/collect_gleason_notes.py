@@ -4,8 +4,8 @@ Scans notes for every prostate patient, groups matches into per-patient,
 payload-sized chunks, and writes them as evidence for the LLM step.
 
 Outputs (under <output-dir>):
-  gleason_evidence.tsv        one row per snippet, grouped by patient/chunk
-  gleason_evidence.meta.json  scan_config hash + resolved params the evidence
+  gleason_evidence.parquet        one row per snippet, grouped by patient/chunk
+  gleason_evidence.meta.parquet   scan_config hash + resolved params the evidence
                                was built under (used by build_gleason_timeline.py
                                to validate that chunk-index resume is safe)
 
@@ -27,15 +27,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from preprocessing.config import DEFAULT_DATA_PATH, PROSTATE_TEXT_CSV, SNIPPET_PROFILES  # noqa: E402
+from preprocessing.config import (  # noqa: E402
+    DEFAULT_DATA_PATH,
+    DEFAULT_PROFILE_NOTE_PATHS,
+    GLEASON_EVIDENCE_SCHEMA_VERSION,
+    SNIPPET_PROFILES,
+)
 from preprocessing.longitudinal import (  # noqa: E402
     evidence_scan_config_key,
+    file_sha256,
     filter_note_types,
     group_patient_snippets,
     read_scan_config_meta,
     write_scan_config_meta,
 )
 from preprocessing.notes import load_notes, load_selected_mrns  # noqa: E402
+from preprocessing.parquet_io import write_parquet_atomic  # noqa: E402
+from preprocessing.triggers import combined_text_pattern  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_gleason_timeline"
 _PROFILE = SNIPPET_PROFILES["longitudinal"]
@@ -54,9 +62,11 @@ def parse_args():
     )
     parser.add_argument("--mrn-file", type=Path, default=None)
     parser.add_argument("--mrns", default=None)
-    parser.add_argument("--notes-csv", type=Path, default=PROSTATE_TEXT_CSV)
-    parser.add_argument("--note-bundle-path", type=Path, default=None)
-    parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
+    parser.add_argument("--notes-parquet", type=Path, action="append", default=None,
+                        help="PROFILE_DATA clinical-note parquet. Repeat for multiple files; "
+                             "defaults to pathology, imaging, and progress notes.")
+    parser.add_argument("--note-bundle-path", type=Path, default=None,
+                        help="Standardized Parquet note bundle override.")
     parser.add_argument(
         "--note-types",
         nargs="+",
@@ -95,27 +105,43 @@ def parse_args():
 
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    evidence_path = args.output_dir / "gleason_evidence.tsv"
-    meta_path = args.output_dir / "gleason_evidence.meta.json"
+    evidence_path = args.output_dir / "gleason_evidence.parquet"
+    meta_path = args.output_dir / "gleason_evidence.meta.parquet"
     snippet_max_chars = SNIPPET_PROFILES["longitudinal"].max_chars
 
     if args.overwrite:
-        evidence_path.unlink(missing_ok=True)
-        meta_path.unlink(missing_ok=True)
+        for path in (
+            evidence_path,
+            meta_path,
+            args.output_dir / "gleason_extractions_raw.parquet",
+            args.output_dir / "gleason_processed_chunks.parquet",
+            args.output_dir / "gleason_processed_patients.parquet",
+            args.output_dir / "gleason_timeline.parquet",
+            args.output_dir / "gleason_run.parquet",
+        ):
+            path.unlink(missing_ok=True)
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
+    direct_parquet = args.note_bundle_path is None
+    if direct_parquet and selected_mrns is None:
+        raise ValueError(
+            "Gleason extraction is prostate-specific. Direct PROFILE_DATA parquet "
+            "runs require --mrns or --mrn-file to define the prostate cohort."
+        )
     notes_df = load_notes(
-        csv_path=args.notes_csv,
+        parquet_paths=(args.notes_parquet or DEFAULT_PROFILE_NOTE_PATHS)
+        if args.note_bundle_path is None else None,
         bundle_path=args.note_bundle_path,
-        raw_text_paths=args.raw_text_path,
         selected_mrns=selected_mrns,
+        text_pattern=combined_text_pattern(TRIGGER_REGEX),
+        note_types=args.note_types,
     )
     print(
         f"Loaded notes: {len(notes_df)} rows for "
         f"{notes_df['DFCI_MRN'].n_unique()} patients"
     )
 
-    if args.note_types:
+    if args.note_types and args.note_bundle_path is not None:
         notes_df = filter_note_types(notes_df, args.note_types)
         print(f"After note-type filter {args.note_types}: {len(notes_df)} rows")
 
@@ -141,6 +167,19 @@ def run(args):
                 f"({existing_meta.get('scan_config')} != {scan_config}). "
                 "Re-run with --overwrite instead of mixing incompatible evidence "
                 "and chunk state."
+            )
+        if existing_meta.get("evidence_schema_version") != GLEASON_EVIDENCE_SCHEMA_VERSION:
+            raise ValueError(
+                "Existing Gleason evidence predates the current cohort/evidence "
+                "contract. Re-run with --overwrite."
+            )
+        recorded_digest = existing_meta.get("evidence_sha256")
+        actual_digest = file_sha256(evidence_path)
+        if not recorded_digest or recorded_digest != actual_digest:
+            raise ValueError(
+                "Existing Gleason evidence content does not match its metadata "
+                "sidecar. Re-run with --overwrite to rebuild evidence and "
+                "downstream state."
             )
         print(f"Existing evidence matches current scan settings, reusing: {evidence_path}")
         return
@@ -174,7 +213,7 @@ def run(args):
         evidence = pl.DataFrame({c: [r.get(c) for r in rows] for c in EVIDENCE_COLUMNS})
     else:
         evidence = pl.DataFrame(schema={c: pl.Utf8 for c in EVIDENCE_COLUMNS})
-    evidence.write_csv(evidence_path, separator="\t")
+    write_parquet_atomic(evidence, evidence_path)
     write_scan_config_meta(
         meta_path,
         scan_config,
@@ -182,6 +221,9 @@ def run(args):
         snippet_max_chars=snippet_max_chars,
         payload_max_chars=args.payload_max_chars,
         note_types=args.note_types,
+        evidence_sha256=file_sha256(evidence_path),
+        evidence_schema_version=GLEASON_EVIDENCE_SCHEMA_VERSION,
+        cohort_mrn_count=len(selected_mrns) if selected_mrns is not None else None,
     )
     print(f"Wrote Gleason evidence ({evidence.height} rows): {evidence_path}")
 

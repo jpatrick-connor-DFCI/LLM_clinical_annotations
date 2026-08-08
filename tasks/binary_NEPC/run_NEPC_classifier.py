@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,7 +17,15 @@ from preprocessing.bundles.snippet_bundle import (  # noqa: E402
     load_snippet_bundle,
 )
 from preprocessing.config import CLINICAL_SAFETY_CONTEXT, DEFAULT_OUTPUT_DIR  # noqa: E402
+from preprocessing.grounding import find_quote_support  # noqa: E402
 from preprocessing.notes import load_selected_mrns  # noqa: E402
+from preprocessing.longitudinal import file_sha256  # noqa: E402
+from preprocessing.parquet_io import (  # noqa: E402
+    append_rows_atomic,
+    read_metadata,
+    write_metadata,
+    write_parquet_atomic,
+)
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
 from tasks.binary_NEPC.prompts import CLASSIFY_SYSTEM_PROMPT  # noqa: E402
@@ -24,6 +33,7 @@ from tasks.binary_NEPC.prompts import CLASSIFY_SYSTEM_PROMPT  # noqa: E402
 
 OUTPUT_COLUMNS = [
     "DFCI_MRN",
+    "review_status",
     "primary_label",
     "has_nepc",
     "has_avpc",
@@ -41,6 +51,10 @@ OUTPUT_COLUMNS = [
     "num_snippets",
 ]
 FAILURE_COLUMNS = ["DFCI_MRN", "error", "num_snippets"]
+_PRIMARY_LABELS = {"nepc", "avpc", "biomarker", "conventional"}
+_CONFIDENCE_LEVELS = {"high", "medium", "low"}
+_AVPC_CRITERIA = {f"C{index}" for index in range(1, 8)}
+BINARY_EXTRACTION_SCHEMA_VERSION = "binary-nepc-grounded-parquet-v4"
 
 
 def parse_args():
@@ -78,38 +92,20 @@ def parse_args():
     run_mode.add_argument(
         "--retry-failures",
         action="store_true",
-        help="Only rerun MRNs currently listed in the failed-patients TSV.",
+        help="Only rerun MRNs currently listed in the failed-patients Parquet.",
     )
     return parser.parse_args()
 
 
-def _append_tsv_row(path, row, columns):
-    """Append a single row to a TSV, writing the header only on first write.
-
-    Polars has no append mode for write_csv, so the header/row text is written
-    directly with a file handle kept open in append mode.
-    """
-    write_header = not path.exists() or path.stat().st_size == 0
-    df = pl.DataFrame({c: [row.get(c)] for c in columns})
-    text = df.write_csv(separator="\t", include_header=write_header)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(text)
-
-
 def append_row(path, row):
-    _append_tsv_row(path, row, OUTPUT_COLUMNS)
+    append_rows_atomic(path, [row], OUTPUT_COLUMNS)
 
 
 def read_mrns(path):
-    """Read the patient identifiers from an existing pipeline TSV."""
+    """Read patient identifiers from an existing pipeline Parquet artifact."""
     if not path.exists() or path.stat().st_size == 0:
         return set()
-    # truncate_ragged_lines tolerates historical rows whose error text broke
-    # the column count (e.g. an unescaped separator/quote from an older writer
-    # version) — we only need DFCI_MRN out of this read, so a truncated
-    # error/num_snippets value on a bad row is an acceptable trade-off for not
-    # crashing the whole run.
-    frame = pl.read_csv(path, separator="\t", truncate_ragged_lines=True)
+    frame = pl.read_parquet(path)
     if "DFCI_MRN" not in frame.columns:
         raise ValueError(f"Missing DFCI_MRN column in {path}")
     return set(
@@ -118,11 +114,11 @@ def read_mrns(path):
 
 
 def remove_failures(path, mrns):
-    """Remove resolved patients from the failure TSV while preserving its header."""
+    """Remove resolved patients from the failure Parquet artifact."""
     mrns = {int(mrn) for mrn in mrns}
     if not mrns or not path.exists() or path.stat().st_size == 0:
         return
-    frame = pl.read_csv(path, separator="\t", truncate_ragged_lines=True)
+    frame = pl.read_parquet(path)
     if "DFCI_MRN" not in frame.columns:
         raise ValueError(f"Missing DFCI_MRN column in {path}")
     remaining = frame.filter(
@@ -130,16 +126,14 @@ def remove_failures(path, mrns):
     )
     if remaining.height == frame.height:
         return
-    temporary_path = path.with_name(f".{path.name}.tmp")
-    remaining.write_csv(temporary_path, separator="\t")
-    temporary_path.replace(path)
+    write_parquet_atomic(remaining, path)
 
 
 def append_failure(path, mrn, error, num_snippets):
     row = {"DFCI_MRN": int(mrn), "error": error, "num_snippets": int(num_snippets)}
     # Keep only the latest error when the same patient fails repeated retries.
     remove_failures(path, [mrn])
-    _append_tsv_row(path, row, FAILURE_COLUMNS)
+    append_rows_atomic(path, [row], FAILURE_COLUMNS)
 
 
 def classify_patient(provider, client, model, max_retries, mrn, snippets):
@@ -168,6 +162,88 @@ def classify_patient(provider, client, model, max_retries, mrn, snippets):
         return None, f"json_parse: {exc}"
     if not isinstance(result, dict):
         return None, f"non_dict_response: {type(result).__name__}"
+    return validate_result(result, snippets)
+
+
+def validate_result(result, snippets):
+    """Validate the classifier schema, cross-field invariants, and quote provenance."""
+    boolean_fields = (
+        "has_nepc",
+        "has_avpc",
+        "has_biomarker",
+        "has_molecular_avpc",
+        "has_non_prostate_primary",
+    )
+    for field in boolean_fields:
+        if not isinstance(result.get(field), bool):
+            return None, f"invalid_boolean:{field}"
+
+    primary_label = result.get("primary_label")
+    if primary_label not in _PRIMARY_LABELS:
+        return None, f"invalid_primary_label:{primary_label}"
+    expected_label = (
+        "nepc"
+        if result["has_nepc"]
+        else "avpc"
+        if result["has_avpc"]
+        else "biomarker"
+        if result["has_biomarker"]
+        else "conventional"
+    )
+    if primary_label != expected_label:
+        return None, f"inconsistent_primary_label:{primary_label}!={expected_label}"
+
+    list_fields = (
+        "biomarker_genes",
+        "avpc_criteria",
+        "non_prostate_primary_types",
+        "supporting_quotes",
+        "supporting_quote_dates",
+    )
+    for field in list_fields:
+        if not isinstance(result.get(field), list):
+            return None, f"invalid_list:{field}"
+
+    criteria = result["avpc_criteria"]
+    if any(value not in _AVPC_CRITERIA for value in criteria):
+        return None, "invalid_avpc_criterion"
+    if criteria and not result["has_avpc"]:
+        return None, "avpc_criteria_without_has_avpc"
+    visceral_pattern = result.get("visceral_met_pattern")
+    if visceral_pattern not in {"visceral_only", "none"}:
+        return None, f"invalid_visceral_met_pattern:{visceral_pattern}"
+    if ("C2" in criteria) != (visceral_pattern == "visceral_only"):
+        return None, "inconsistent_c2_visceral_pattern"
+
+    normalized_genes = {str(value).strip().upper() for value in result["biomarker_genes"]}
+    expected_biomarker = bool(normalized_genes & {"BRCA1", "BRCA2"})
+    if result["has_biomarker"] != expected_biomarker:
+        return None, "inconsistent_has_biomarker"
+    expected_molecular_avpc = len(normalized_genes & {"PTEN", "TP53", "RB1"}) >= 2
+    if result["has_molecular_avpc"] != expected_molecular_avpc:
+        return None, "inconsistent_has_molecular_avpc"
+    if result["has_non_prostate_primary"] != bool(result["non_prostate_primary_types"]):
+        return None, "inconsistent_non_prostate_primary"
+
+    confidence = result.get("confidence")
+    if confidence not in _CONFIDENCE_LEVELS:
+        return None, f"invalid_confidence:{confidence}"
+    if not isinstance(result.get("rationale"), str) or not result["rationale"].strip():
+        return None, "missing_rationale"
+
+    quotes = result["supporting_quotes"]
+    quote_dates = result["supporting_quote_dates"]
+    if len(quotes) != len(quote_dates):
+        return None, "quote_date_count_mismatch"
+    if any(result[field] for field in boolean_fields) and not quotes:
+        return None, "positive_result_without_supporting_quote"
+    for quote, quote_date in zip(quotes, quote_dates):
+        if not isinstance(quote, str) or not quote.strip():
+            return None, "invalid_supporting_quote"
+        support = find_quote_support(quote, snippets, claimed_date=quote_date)
+        if support is None or support.get("note_date") != quote_date:
+            return None, "supporting_quote_or_date_not_in_evidence"
+
     return result, None
 
 
@@ -186,23 +262,36 @@ def _as_list(value):
     return [value]
 
 
+def _as_string_set(value):
+    """Return a deterministic, case-insensitively deduplicated string set."""
+    unique = {}
+    for item in _as_list(value):
+        text = str(item).strip()
+        if text:
+            unique.setdefault(text.casefold(), text)
+    return [unique[key] for key in sorted(unique)]
+
+
 def make_row(mrn, num_snippets, result):
     return {
         "DFCI_MRN": int(mrn),
+        "review_status": "llm_classified",
         "primary_label": result.get("primary_label"),
         "has_nepc": result.get("has_nepc"),
         "has_avpc": result.get("has_avpc"),
         "has_biomarker": result.get("has_biomarker"),
         "has_molecular_avpc": result.get("has_molecular_avpc"),
         "has_non_prostate_primary": result.get("has_non_prostate_primary"),
-        "biomarker_genes": " | ".join(str(g) for g in _as_list(result.get("biomarker_genes"))),
-        "avpc_criteria": " | ".join(str(c) for c in _as_list(result.get("avpc_criteria"))),
+        "biomarker_genes": _as_string_set(result.get("biomarker_genes")),
+        "avpc_criteria": _as_string_set(result.get("avpc_criteria")),
         "visceral_met_pattern": result.get("visceral_met_pattern"),
-        "non_prostate_primary_types": " | ".join(
-            str(t) for t in _as_list(result.get("non_prostate_primary_types"))
+        "non_prostate_primary_types": _as_string_set(
+            result.get("non_prostate_primary_types")
         ),
-        "supporting_quotes": " | ".join(str(q) for q in _as_list(result.get("supporting_quotes"))),
-        "supporting_quote_dates": " | ".join(str(d) for d in _as_list(result.get("supporting_quote_dates"))),
+        "supporting_quotes": [str(q) for q in _as_list(result.get("supporting_quotes"))],
+        "supporting_quote_dates": [
+            str(d) for d in _as_list(result.get("supporting_quote_dates"))
+        ],
         "confidence": result.get("confidence"),
         "rationale": result.get("rationale"),
         "num_snippets": int(num_snippets),
@@ -212,32 +301,90 @@ def make_row(mrn, num_snippets, result):
 def conventional_row(mrn):
     return {
         "DFCI_MRN": int(mrn),
+        "review_status": "no_trigger",
         "primary_label": "conventional",
         "has_nepc": False,
         "has_avpc": False,
         "has_biomarker": False,
         "has_molecular_avpc": False,
         "has_non_prostate_primary": False,
-        "biomarker_genes": "",
-        "avpc_criteria": "",
+        "biomarker_genes": [],
+        "avpc_criteria": [],
         "visceral_met_pattern": "none",
-        "non_prostate_primary_types": "",
-        "supporting_quotes": "",
-        "supporting_quote_dates": "",
+        "non_prostate_primary_types": [],
+        "supporting_quotes": [],
+        "supporting_quote_dates": [],
         "confidence": "high",
         "rationale": "No NEPC / AVPC / biomarker / non-prostate-primary triggers found in any reviewed note.",
         "num_snippets": 0,
     }
 
 
+def no_notes_row(mrn):
+    row = {column: None for column in OUTPUT_COLUMNS}
+    row.update({
+        "DFCI_MRN": int(mrn),
+        "review_status": "no_notes",
+        "rationale": "No PROFILE_DATA clinical notes were available for this cohort patient.",
+        "num_snippets": 0,
+    })
+    return row
+
+
+def _run_fingerprint(snippets_path, provider_name, model):
+    hasher = hashlib.sha256()
+    for value in (
+        file_sha256(snippets_path),
+        provider_name,
+        model,
+        CLASSIFY_SYSTEM_PROMPT,
+        CLINICAL_SAFETY_CONTEXT,
+        BINARY_EXTRACTION_SCHEMA_VERSION,
+        json.dumps(OUTPUT_COLUMNS),
+    ):
+        hasher.update(value.encode("utf-8"))
+    return hasher.hexdigest()[:20]
+
+
+def _validate_run_fingerprint(path, run_config, has_existing_outputs, overwrite):
+    if overwrite or not has_existing_outputs:
+        write_metadata(path, {"run_config": run_config})
+        return
+    if not path.exists():
+        raise ValueError(
+            "Existing binary NEPC outputs predate run fingerprinting. Re-run with "
+            "--overwrite rather than mixing them with the current snippet bundle."
+        )
+    try:
+        recorded = (read_metadata(path) or {}).get("run_config")
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise ValueError(f"Invalid binary NEPC run metadata: {path}") from exc
+    if recorded != run_config:
+        raise ValueError(
+            f"Binary NEPC inputs/config changed ({recorded} != {run_config}). "
+            "Re-run with --overwrite."
+        )
+
+
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = args.output_dir / "LLM_NEPC_classifier_labels.tsv"
-    failures_path = args.output_dir / "LLM_NEPC_classifier_failed_patients.tsv"
+    output_path = args.output_dir / "LLM_NEPC_classifier_labels.parquet"
+    failures_path = args.output_dir / "LLM_NEPC_classifier_failed_patients.parquet"
+    run_meta_path = args.output_dir / "LLM_NEPC_classifier_run.parquet"
 
     if args.overwrite:
         output_path.unlink(missing_ok=True)
         failures_path.unlink(missing_ok=True)
+
+    provider = get_provider(args.provider)
+    model = args.model or provider.default_model
+    run_config = _run_fingerprint(args.snippets_path, args.provider, model)
+    _validate_run_fingerprint(
+        run_meta_path,
+        run_config,
+        output_path.exists() or failures_path.exists(),
+        args.overwrite,
+    )
 
     completed = read_mrns(output_path)
     failed = read_mrns(failures_path)
@@ -270,10 +417,14 @@ def run(args):
         print(f"Snippet compilation metadata: {json.dumps(snippet_metadata)}")
 
     triggered_mrns = set(patient_snippets.keys())
-    no_signal_mrns = all_mrns - triggered_mrns
+    no_note_mrns = {
+        int(mrn) for mrn in snippet_metadata.get("no_note_mrns", [])
+    } & all_mrns
+    no_signal_mrns = all_mrns - triggered_mrns - no_note_mrns
 
     print(f"Patients with triggered snippets: {len(triggered_mrns)}")
     print(f"Patients with no signal (auto-conventional): {len(no_signal_mrns)}")
+    print(f"Patients with no notes (unclassified): {len(no_note_mrns)}")
 
     print(f"Already completed: {len(completed)}")
 
@@ -283,16 +434,17 @@ def run(args):
     print(f"Patients to classify with LLM: {len(mrns_to_run)}")
 
     no_signal_to_write = sorted(no_signal_mrns - completed)
+    no_notes_to_write = sorted(no_note_mrns - completed)
 
     if not mrns_to_run:
         for mrn in no_signal_to_write:
             append_row(output_path, conventional_row(mrn))
-        remove_failures(failures_path, no_signal_to_write)
+        for mrn in no_notes_to_write:
+            append_row(output_path, no_notes_row(mrn))
+        remove_failures(failures_path, no_signal_to_write + no_notes_to_write)
         print(f"Wrote labels: {output_path}")
         return
 
-    provider = get_provider(args.provider)
-    model = args.model or provider.default_model
     client = provider.build_client()
 
     def worker(mrn):
@@ -307,7 +459,9 @@ def run(args):
         futures = {executor.submit(worker, mrn): mrn for mrn in mrns_to_run}
         for mrn in no_signal_to_write:
             append_row(output_path, conventional_row(mrn))
-        remove_failures(failures_path, no_signal_to_write)
+        for mrn in no_notes_to_write:
+            append_row(output_path, no_notes_row(mrn))
+        remove_failures(failures_path, no_signal_to_write + no_notes_to_write)
         for future in tqdm(
             as_completed(futures), total=len(futures), desc="Patients", unit="pt"
         ):

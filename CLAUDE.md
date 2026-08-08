@@ -10,26 +10,26 @@ from the repo root.
 pip install -e ".[dfci_gpt]"     # or ".[vertex_ai]"
 
 # Build the shared note source (required before most pipelines)
-python preprocessing/cli/compile_prostate_notes.py --derive-prostate-mrns
+python preprocessing/cli/compile_patient_snippets.py --mrn-file /path/to/prostate_mrns.parquet
 
 # Binary NEPC: compile snippets, then classify
-python preprocessing/cli/compile_patient_snippets.py --output-path /path/to/patient_snippets.json.gz
-python tasks/binary_NEPC/run_NEPC_classifier.py --snippets-path /path/to/patient_snippets.json.gz --output-dir /path/to/out --provider dfci_gpt
+python preprocessing/cli/compile_patient_snippets.py --mrn-file /path/to/prostate_mrns.parquet --output-path /path/to/patient_snippets.parquet
+python tasks/binary_NEPC/run_NEPC_classifier.py --snippets-path /path/to/patient_snippets.parquet --output-dir /path/to/out --provider dfci_gpt
 
 # Cancer stage / Gleason / longitudinal NEPC: collect evidence, then extract
 python preprocessing/cli/extract_stage_notes.py --output-dir /path/to/out          # stage: scan (no LLM)
 python tasks/cancer_stage/run_stage_extraction.py --output-dir /path/to/out --provider vertex_ai
 
-python preprocessing/cli/collect_gleason_notes.py --output-dir /path/to/out
+python preprocessing/cli/collect_gleason_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out
 python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
-python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
+python preprocessing/cli/collect_nepc_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out
 python tasks/longitudinal_NEPC/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
-python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
-python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --context-chars 4000 --overwrite
+python preprocessing/cli/collect_nepc_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out --scan-workers 16
+python preprocessing/cli/collect_nepc_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out --context-chars 4000 --overwrite
 
 # Pilot / subset run (most task runners support these)
 python tasks/cancer_stage/run_stage_extraction.py --mrns "12345,67890" --provider dfci_gpt
@@ -58,10 +58,10 @@ messages, max_retries=3) -> (text, error)`, and registering it in
 ### Data flow
 
 ```
-OncDRS raw JSONs → preprocessing/cli/compile_prostate_notes.py → prostate_text_data.csv
+PROFILE_DATA/CLINICAL_NOTES/*.parquet → task-specific evidence/snippet artifacts
                                           │
                           preprocessing.notes.load_notes()
-             (precedence: explicit bundle > compiled CSV > raw OncDRS JSONs)
+                 (explicit note parquets > Parquet bundle > default parquets)
                                           │
                        preprocessing.utils.clean_note()
                                           │
@@ -71,8 +71,17 @@ OncDRS raw JSONs → preprocessing/cli/compile_prostate_notes.py → prostate_te
                                           │
                     tasks/<task>/*.py: LLM calls via providers.get_provider(...)
                                           │
-                    incremental TSV writes → final dedup / timeline build
+                 incremental Parquet writes → final dedup / timeline build
 ```
+
+Direct parquet runs push MRN, note-type, and task candidate predicates into the
+lazy scan. Python cleaning/process pools operate only on candidate notes. The
+PROFILE source contract is the physical schema emitted by
+`PROFILE_data_processing`: pathology/imaging rows contain `RPT_ID`, `DFCI_MRN`,
+`EVENT_DATE`, `PROC_DESC`, `RPT_TYPE`, `RPT_TEXT`, and `FILE`; progress rows
+contain `RPT_ID`, `DFCI_MRN`, `EVENT_DATE`, `INP_RPT_TYPE`, `PROVIDER_TYPE`,
+`ENCOUNTER_TYPE_DESC`, `RPT_TEXT`, and `FILE`. `RPT_TEXT` is already the merged
+complete text; do not append or require `NARRATIVE_TEXT` downstream.
 
 ### Two-phase task pattern
 
@@ -80,15 +89,14 @@ Every task is split into a **preprocessing** step and a **task runner**:
 
 1. **Preprocessing** (`preprocessing/cli/`) — provider-independent. Regex
    trigger matching across notes, context-window extraction, writes an
-   evidence/snippet artifact (TSV or `.json.gz` bundle). `compile_patient_snippets.py`
+   Parquet evidence/snippet artifact. `compile_patient_snippets.py`
    and `collect_gleason_notes.py`/`collect_nepc_notes.py` use
    `ProcessPoolExecutor` for the per-note scan (`--scan-workers`, default
    `os.cpu_count()`); dedup and chunk packing stay single-process because dedup
-   must see the whole cohort. `extract_stage_notes.py` additionally parallelizes
-   over raw files and resumes (skips already-scanned files) when re-run without
-   `--overwrite`.
+   must see the whole cohort. `extract_stage_notes.py` lazily prefilters the
+   PROFILE_DATA parquets to stage-bearing notes before materializing them.
 
-   The two longitudinal collectors write a `*_evidence.meta.json` sidecar
+   All evidence-producing collectors write a metadata sidecar or bundle metadata
    recording a hash of the resolved scan settings. Re-running with unchanged
    settings reuses the existing evidence and skips the scan; changed settings
    raise rather than silently mixing incompatible evidence, so `--overwrite` is
@@ -98,10 +106,12 @@ Every task is split into a **preprocessing** step and a **task runner**:
    calls the selected provider once per chunk via `ThreadPoolExecutor`, writes
    raw findings + a processed-patient log incrementally. `run_NEPC_classifier.py`
    resumes at **patient** granularity and supports `--retry-failures` to retry
-   only prior failures.
+   only prior failures. Staging and binary NEPC also persist a run fingerprint;
+   changed evidence, model, prompt, payload sizing, or output schema requires
+   `--overwrite` instead of silently mixing output generations.
 
    The two longitudinal timeline builders resume at **chunk** granularity via
-   `avpc_nepc_processed_chunks.tsv` / `gleason_processed_chunks.tsv`: a patient
+   `avpc_nepc_processed_chunks.parquet` / `gleason_processed_chunks.parquet`: a patient
    whose chunk 2 failed re-runs only chunk 2, keeping the findings the other
    chunks already produced, and per-patient status is derived as
    `ok` / `partial:N/M` / `failed:<err>`. Because `chunk_index` is the resume
@@ -111,6 +121,11 @@ Every task is split into a **preprocessing** step and a **task runner**:
 
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.
+
+All repository-owned persisted I/O uses Zstandard-compressed Parquet, including
+evidence, snippet bundles, run/scan metadata, processed ledgers, rejected or
+failed rows, raw findings, and final timelines/labels. JSON is restricted to
+provider request/response payloads and serialized audit values inside Parquet.
 
 ### Snippet sizing
 
@@ -145,8 +160,8 @@ data-path variables.
 
 ### Note types
 
-Notes are classified `Clinician`, `Imaging`, or `Pathology` from filename
-patterns in the OncDRS source files. This drives both cleaning rules
+Notes are classified `Clinician`, `Imaging`, or `Pathology` from the three
+PROFILE_DATA parquet basenames. This drives both cleaning rules
 (`preprocessing/utils.py`) and snippet-selection heuristics.
 
 ### Notebooks

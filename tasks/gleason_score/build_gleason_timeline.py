@@ -1,27 +1,23 @@
 """Stage 2 — Call the LLM on per-patient Gleason evidence chunks; write the timeline.
 
-Reads gleason_evidence.tsv produced by collect_gleason_notes.py. Calls the LLM
+Reads gleason_evidence.parquet produced by collect_gleason_notes.py. Calls the LLM
 once per chunk, and aggregates the findings into a deduped per-patient timeline.
 
 Outputs (under <output-dir>):
-  gleason_extractions_raw.tsv     per-finding extractions (provenance, pre-dedup)
-  gleason_processed_chunks.tsv    per-chunk log — the unit of resume. Each row
+  gleason_extractions_raw.parquet     per-finding extractions (provenance, pre-dedup)
+  gleason_processed_chunks.parquet    per-chunk log — the unit of resume. Each row
                                    also records the evidence scan_config hash
-                                   (read from gleason_evidence.meta.json) it was
+                                   (read from gleason_evidence.meta.parquet) it was
                                    produced under, so a regenerated evidence file
                                    with different scan params can't silently
                                    "resume" onto now-mismatched chunk indices.
-  gleason_processed_patients.tsv  processed-patient log (derived per-patient status)
-  gleason_timeline.tsv            deduped timeline (every score + date per patient)
+  gleason_processed_patients.parquet  processed-patient log (derived per-patient status)
+  gleason_timeline.parquet            deduped timeline (every score + date per patient)
 
-Evidence-hash guard: if gleason_evidence.meta.json exists (written by
-collect_gleason_notes.py) and its scan_config disagrees with the value already
-recorded in gleason_processed_chunks.tsv, this raises rather than resuming —
-the evidence was regenerated with different scan parameters, so old chunk
-indices no longer mean the same thing. Restore the matching evidence file or
-re-run with --overwrite to discard the stale chunk log. If no meta sidecar
-exists (evidence generated before this check), this warns and proceeds, since
-older evidence on disk has no recorded hash to compare against.
+Resume guard: the evidence content, scan configuration, provider, model, prompt,
+and output schemas are fingerprinted. Any mismatch raises rather than mixing
+incompatible chunk results; re-run with --overwrite to intentionally start a
+new extraction generation.
 
 Usage:
   # Run collection first:
@@ -32,9 +28,11 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import polars as pl
@@ -44,19 +42,33 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from preprocessing.config import CLINICAL_SAFETY_CONTEXT, DEFAULT_DATA_PATH  # noqa: E402
+from preprocessing.config import (  # noqa: E402
+    CLINICAL_SAFETY_CONTEXT,
+    DEFAULT_DATA_PATH,
+    GLEASON_EVIDENCE_SCHEMA_VERSION,
+)
+from preprocessing.grounding import find_quote_support  # noqa: E402
 from preprocessing.longitudinal import (  # noqa: E402
     derive_grade_group,
+    file_sha256,
     flatten_ws,
+    parse_stated_date,
     read_scan_config_meta,
     resolve_date,
 )
-from preprocessing.notes import load_selected_mrns  # noqa: E402
+from preprocessing.notes import load_selected_mrns, to_iso_date  # noqa: E402
+from preprocessing.parquet_io import (  # noqa: E402
+    append_rows_atomic,
+    read_metadata,
+    write_metadata,
+    write_rows_atomic,
+)
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
 from tasks.gleason_score.prompts import GLEASON_SYSTEM_PROMPT  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_gleason_timeline"
+GLEASON_EXTRACTION_SCHEMA_VERSION = "gleason-grounded-parquet-v3"
 
 RAW_COLUMNS = [
     "DFCI_MRN",
@@ -72,7 +84,7 @@ RAW_COLUMNS = [
     "quote",
 ]
 
-# Sanity bound on chunk_index read back from the evidence TSV. Real patients have
+# Sanity bound on chunk_index read back from the evidence Parquet. Real patients have
 # single-digit chunk counts; anything beyond this is a misaligned row.
 MAX_CHUNK_INDEX = 10_000
 
@@ -97,14 +109,22 @@ PROCESSED_COLUMNS = [
     "num_chunks_ok",
     "num_findings",
     "status",
+    "run_config",
 ]
 
 # Per-chunk log: the unit of resume. A chunk that failed is retried on the next
 # run without re-calling the chunks that already succeeded. scan_config records
-# the evidence hash (from gleason_evidence.meta.json) each row's chunk_index
+# the evidence hash (from gleason_evidence.meta.parquet) each row's chunk_index
 # was assigned under, so a regenerated evidence file with different scan params
 # can be detected before "resuming" onto now-mismatched chunks.
-CHUNK_COLUMNS = ["DFCI_MRN", "chunk_index", "num_findings", "status", "scan_config"]
+CHUNK_COLUMNS = [
+    "DFCI_MRN",
+    "chunk_index",
+    "num_findings",
+    "status",
+    "scan_config",
+    "run_config",
+]
 
 
 def parse_args():
@@ -112,9 +132,9 @@ def parse_args():
         description="Call the LLM on Gleason evidence chunks and write a Gleason timeline."
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
-                        help="Directory containing gleason_evidence.tsv and where outputs are written.")
+                        help="Directory containing gleason_evidence.parquet and where outputs are written.")
     parser.add_argument("--evidence-path", type=Path, default=None,
-                        help="Override path to gleason_evidence.tsv.")
+                        help="Override path to gleason_evidence.parquet.")
     parser.add_argument("--mrn-file", type=Path, default=None)
     parser.add_argument("--mrns", default=None)
     parser.add_argument(
@@ -136,32 +156,22 @@ def parse_args():
 
 
 def append_rows(path, rows, columns):
-    """Append rows to a TSV, writing the header only on the first write.
-
-    Polars has no append mode for write_csv, so the CSV text is generated
-    in-memory and appended via a plain file handle.
-    """
-    if not rows:
-        return
-    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
-    write_header = not path.exists() or path.stat().st_size == 0
-    text = df.write_csv(separator="\t", include_header=write_header)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(text)
+    """Append a complete row batch to an atomic Parquet artifact."""
+    append_rows_atomic(path, rows, columns)
 
 
-def read_done_chunks(path):
+def read_done_chunks(path, run_config=None):
     """Return {(mrn, chunk_index)} for every chunk logged as status == "ok"."""
     if not path.exists() or path.stat().st_size == 0:
         return set()
-    log = pl.read_csv(
-        path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
-    )
+    log = pl.read_parquet(path)
     if "DFCI_MRN" not in log.columns or "chunk_index" not in log.columns:
         return set()
     done = set()
     for row in log.iter_rows(named=True):
         if row.get("status") != "ok":
+            continue
+        if run_config is not None and row.get("run_config") != run_config:
             continue
         mrn = _to_int(row.get("DFCI_MRN"))
         idx = _to_int(row.get("chunk_index"))
@@ -171,61 +181,93 @@ def read_done_chunks(path):
     return done
 
 
-def check_scan_config(chunk_log_path, meta_path):
+def _meta_path_for_evidence(evidence_path):
+    return evidence_path.with_name(f"{evidence_path.stem}.meta.parquet")
+
+
+def _gleason_run_fingerprint(evidence_path, provider_name, model):
+    """Bind resume state to evidence, backend, prompt, and output contracts."""
+    hasher = hashlib.sha256()
+    for value in (
+        file_sha256(evidence_path),
+        provider_name,
+        model,
+        GLEASON_SYSTEM_PROMPT,
+        CLINICAL_SAFETY_CONTEXT,
+        GLEASON_EXTRACTION_SCHEMA_VERSION,
+        json.dumps(RAW_COLUMNS),
+        json.dumps(TIMELINE_COLUMNS),
+        json.dumps(CHUNK_COLUMNS),
+        json.dumps(PROCESSED_COLUMNS),
+    ):
+        hasher.update(value.encode("utf-8"))
+    return hasher.hexdigest()[:20]
+
+
+def _validate_gleason_run(path, run_config, has_outputs, overwrite):
+    if overwrite or not has_outputs:
+        write_metadata(path, {"run_config": run_config})
+        return
+    if not path.exists():
+        raise ValueError(
+            "Existing Gleason outputs predate complete extraction fingerprinting. "
+            "Re-run with --overwrite."
+        )
+    try:
+        recorded = (read_metadata(path) or {}).get("run_config")
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise ValueError(f"Invalid Gleason run metadata: {path}") from exc
+    if recorded != run_config:
+        raise ValueError(
+            "Gleason provider, model, prompt, schema, or evidence changed. "
+            "Re-run with --overwrite to avoid mixed outputs."
+        )
+
+
+def check_scan_config(chunk_log_path, meta_path, evidence_path=None):
     """Guard chunk-index resume against a regenerated evidence file.
 
-    Compares the scan_config hash recorded in the existing chunk log (if any)
-    against the hash recorded in the evidence meta sidecar (if any):
-
-    - Both present, mismatched -> raise. The evidence was regenerated with
-      different scan parameters, so old chunk_index values in the log no
-      longer correspond to the same snippets; resuming would silently extract
-      the wrong text. Restore the matching evidence file, or re-run with
-      --overwrite to discard the stale chunk log and start clean.
-    - No meta sidecar (evidence predates this check) -> warn and proceed. This
-      is the legacy path: there is nothing to validate against, so it is not
-      treated as an error.
-    - No existing chunk log (first run for this output dir) -> nothing to
-      check.
-
-    Returns the current scan_config to record on new chunk-log rows (or None
-    if there is no meta sidecar to record).
+    The metadata sidecar and its evidence SHA-256 are mandatory. If a chunk log
+    exists, its scan_config must match exactly; legacy or unverifiable state is
+    rejected so chunk indices can never be resumed against different evidence.
     """
     meta = read_scan_config_meta(meta_path)
     current_config = meta.get("scan_config") if meta else None
 
-    if not chunk_log_path.exists() or chunk_log_path.stat().st_size == 0:
-        if current_config is None:
-            print(
-                f"Warning: no scan-config sidecar found at {meta_path} "
-                "(evidence predates scan-config tracking); proceeding without "
-                "a hash guard."
+    if current_config is None:
+        raise ValueError(
+            f"Evidence metadata is missing or invalid: {meta_path}. "
+            "Regenerate Gleason evidence with --overwrite."
+        )
+    if meta.get("evidence_schema_version") != GLEASON_EVIDENCE_SCHEMA_VERSION:
+        raise ValueError(
+            "Gleason evidence predates the current cohort/evidence contract. "
+            "Regenerate evidence with --overwrite."
+        )
+    if evidence_path is not None:
+        recorded_digest = meta.get("evidence_sha256") if meta else None
+        actual_digest = file_sha256(evidence_path)
+        if not recorded_digest or recorded_digest != actual_digest:
+            raise ValueError(
+                "Gleason evidence content does not match its metadata sidecar. "
+                "Regenerate evidence with --overwrite."
             )
+
+    if not chunk_log_path.exists() or chunk_log_path.stat().st_size == 0:
         return current_config
 
-    log = pl.read_csv(
-        chunk_log_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
-    )
+    log = pl.read_parquet(chunk_log_path)
     if "scan_config" not in log.columns:
-        print(
-            f"Warning: {chunk_log_path} predates scan-config tracking; proceeding "
-            "without a hash guard. Re-run with --overwrite if you suspect the "
-            "evidence file has changed since this chunk log was built."
+        raise ValueError(
+            f"{chunk_log_path} predates safe scan fingerprinting. "
+            "Re-run with --overwrite."
         )
-        return current_config
 
     recorded_configs = set(log["scan_config"].drop_nulls().cast(pl.Utf8).to_list())
     if not recorded_configs:
-        return current_config
-
-    if current_config is None:
-        print(
-            f"Warning: no scan-config sidecar found at {meta_path}, but the "
-            f"existing chunk log at {chunk_log_path} was built under a recorded "
-            "hash. Proceeding without a hash guard — restore the evidence meta "
-            "sidecar if you want this checked."
+        raise ValueError(
+            f"{chunk_log_path} has no usable scan fingerprint. Re-run with --overwrite."
         )
-        return current_config
 
     if recorded_configs != {current_config}:
         raise ValueError(
@@ -247,20 +289,14 @@ def compact_log(path, columns, key_columns):
     """
     if not path.exists() or path.stat().st_size == 0:
         return
-    log = pl.read_csv(
-        path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
-    )
+    log = pl.read_parquet(path)
     if not all(c in log.columns for c in key_columns):
         return
     before = log.height
     compacted = log.unique(subset=key_columns, keep="last", maintain_order=True)
     if compacted.height == before:
         return
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    compacted.select([c for c in columns if c in compacted.columns]).write_csv(
-        tmp_path, separator="\t"
-    )
-    tmp_path.replace(path)
+    write_rows_atomic(path, compacted.to_dicts(), columns)
     print(f"  Compacted {path.name}: {before} -> {compacted.height} rows")
 
 
@@ -277,9 +313,7 @@ def dedupe_raw_findings(path, columns, key_columns):
     """
     if not path.exists() or path.stat().st_size == 0:
         return
-    log = pl.read_csv(
-        path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True
-    )
+    log = pl.read_parquet(path)
     if not all(c in log.columns for c in key_columns):
         return
     before = log.height
@@ -294,12 +328,79 @@ def dedupe_raw_findings(path, columns, key_columns):
     deduped = log.filter(pl.col("_run") == pl.col("_last_run"))
     if deduped.height == before:
         return
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    deduped.select([c for c in columns if c in deduped.columns]).write_csv(
-        tmp_path, separator="\t"
-    )
-    tmp_path.replace(path)
+    write_rows_atomic(path, deduped.to_dicts(), columns)
     print(f"  Deduped {path.name}: {before} -> {deduped.height} rows")
+
+
+def validate_gleason_finding(finding, chunk):
+    """Validate one grading event and ground its quote/date in supplied evidence."""
+    if not isinstance(finding, dict):
+        return None, "gleason_finding_not_object"
+
+    parsed = {
+        name: _to_int(finding.get(name))
+        for name in ("primary", "secondary", "total", "grade_group")
+    }
+    for name in ("primary", "secondary"):
+        if finding.get(name) is not None and parsed[name] is None:
+            return None, f"invalid_{name}:{finding.get(name)}"
+        if parsed[name] is not None and not 1 <= parsed[name] <= 5:
+            return None, f"out_of_range_{name}:{parsed[name]}"
+    if finding.get("total") is not None and parsed["total"] is None:
+        return None, f"invalid_total:{finding.get('total')}"
+    if parsed["total"] is not None and not 2 <= parsed["total"] <= 10:
+        return None, f"out_of_range_total:{parsed['total']}"
+    if finding.get("grade_group") is not None and parsed["grade_group"] is None:
+        return None, f"invalid_grade_group:{finding.get('grade_group')}"
+    if parsed["grade_group"] is not None and not 1 <= parsed["grade_group"] <= 5:
+        return None, f"out_of_range_grade_group:{parsed['grade_group']}"
+
+    if parsed["primary"] is not None and parsed["secondary"] is not None:
+        derived_total = parsed["primary"] + parsed["secondary"]
+        if parsed["total"] is not None and parsed["total"] != derived_total:
+            return None, "gleason_total_does_not_match_patterns"
+        parsed["total"] = derived_total
+        derived_group = derive_grade_group(parsed["primary"], parsed["secondary"])
+        if (
+            parsed["grade_group"] is not None
+            and derived_group is not None
+            and parsed["grade_group"] != derived_group
+        ):
+            return None, "grade_group_does_not_match_patterns"
+    elif (parsed["primary"] is None) != (parsed["secondary"] is None):
+        return None, "incomplete_gleason_pattern_pair"
+
+    if parsed["total"] is None and parsed["grade_group"] is None:
+        return None, "missing_gleason_score_and_grade_group"
+
+    specimen_type = finding.get("specimen_type")
+    if specimen_type not in {"biopsy", "prostatectomy", "TURP", "metastasis", "unknown"}:
+        return None, f"invalid_specimen_type:{specimen_type}"
+    if not isinstance(finding.get("is_historical_reference"), bool):
+        return None, "invalid_is_historical_reference"
+
+    claimed_source_date = finding.get("source_note_date")
+    source_note_date = to_iso_date(claimed_source_date)
+    if claimed_source_date not in (None, "", "null", "None") and source_note_date is None:
+        return None, f"invalid_source_note_date:{claimed_source_date}"
+    quote = finding.get("quote")
+    support = find_quote_support(quote, chunk, claimed_date=source_note_date)
+    if support is None or support.get("note_date") != source_note_date:
+        return None, "quote_or_source_date_not_in_evidence"
+
+    scoring_date = finding.get("scoring_date")
+    if scoring_date not in (None, "", "null", "None"):
+        stated_iso, _ = parse_stated_date(scoring_date)
+        if stated_iso is None:
+            return None, f"invalid_scoring_date:{scoring_date}"
+        if source_note_date and stated_iso > source_note_date:
+            return None, "scoring_date_after_source_note"
+
+    normalized = dict(finding)
+    normalized.update(parsed)
+    normalized["source_note_date"] = source_note_date
+    normalized["quote"] = flatten_ws(quote)
+    return normalized, None
 
 
 def _extract_chunk(provider, client, model, max_retries, mrn, chunk):
@@ -331,7 +432,13 @@ def _extract_chunk(provider, client, model, max_retries, mrn, chunk):
     found = result.get("gleason_findings")
     if not isinstance(found, list):
         return None, "missing_gleason_findings"
-    return [f for f in found if isinstance(f, dict)], None
+    normalized = []
+    for finding in found:
+        validated, validation_error = validate_gleason_finding(finding, chunk)
+        if validation_error:
+            return None, validation_error
+        normalized.append(validated)
+    return normalized, None
 
 
 def extract_patient(provider, client, model, max_retries, mrn, indexed_chunks):
@@ -390,22 +497,23 @@ def _to_int(value):
     if value is None:
         return None
     try:
-        return int(float(value))
-    except (TypeError, ValueError):
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
         return None
+    if not parsed.is_finite() or parsed != parsed.to_integral_value():
+        return None
+    return int(parsed)
 
 
 def build_timeline(raw_path, timeline_path):
     """Resolve dates, validate, and de-duplicate raw extractions into the timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS}).write_csv(
-            timeline_path, separator="\t"
-        )
+        write_rows_atomic(timeline_path, [], TIMELINE_COLUMNS)
         return 0
 
     # Read every field as text and validate per row, so a single malformed/misaligned
     # row (e.g. free-text that shifted columns) can't abort the whole timeline build.
-    raw = pl.read_csv(raw_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
+    raw = pl.read_parquet(raw_path)
     seen = set()
     rows = []
     skipped = 0
@@ -423,23 +531,30 @@ def build_timeline(raw_path, timeline_path):
         primary = _to_int(r.get("gleason_primary"))
         secondary = _to_int(r.get("gleason_secondary"))
         total = _to_int(r.get("gleason_total"))
-        # Gleason total is primary + secondary by definition; recompute it when
-        # both patterns are present so an LLM arithmetic slip can't propagate.
-        if primary is not None and secondary is not None:
-            total = primary + secondary
-        # Require a usable total; drop grade-group-only or malformed extractions.
-        if total is None or not (2 <= total <= 10):
-            invalid_score += 1
-            continue
+        grade_group = _to_int(r.get("grade_group"))
+        if grade_group is not None and not (1 <= grade_group <= 5):
+            grade_group = None
+
         if primary is not None and not (1 <= primary <= 5):
             invalid_score += 1
             continue
         if secondary is not None and not (1 <= secondary <= 5):
             invalid_score += 1
             continue
+        # Gleason total is primary + secondary by definition; recompute it when
+        # both patterns are present so an LLM arithmetic slip can't propagate.
+        if primary is not None and secondary is not None:
+            total = primary + secondary
+        if total is not None and not (2 <= total <= 10):
+            invalid_score += 1
+            continue
+        # Grade Group by itself is a valid prostate-grading event. Reject only
+        # findings that provide neither a usable Gleason total nor Grade Group.
+        if total is None and grade_group is None:
+            invalid_score += 1
+            continue
 
-        grade_group = _to_int(r.get("grade_group"))
-        if grade_group is None or not (1 <= grade_group <= 5):
+        if grade_group is None:
             grade_group = derive_grade_group(primary, secondary)
 
         gleason_date, date_source, date_precision = resolve_date(
@@ -447,7 +562,15 @@ def build_timeline(raw_path, timeline_path):
         )
         specimen_type = r.get("specimen_type")
 
-        key = (mrn, primary, secondary, total, gleason_date, specimen_type)
+        key = (
+            mrn,
+            primary,
+            secondary,
+            total,
+            grade_group,
+            gleason_date,
+            specimen_type,
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -483,18 +606,52 @@ def build_timeline(raw_path, timeline_path):
         timeline = timeline.sort(
             ["DFCI_MRN", "gleason_date"], nulls_last=True
         )
-    timeline.write_csv(timeline_path, separator="\t")
+    write_rows_atomic(timeline_path, timeline.to_dicts(), TIMELINE_COLUMNS)
     return timeline.height
+
+
+def _load_patient_chunks(evidence_df):
+    """Load evidence without changing its persisted chunk identifiers."""
+    required = {"DFCI_MRN", "chunk_index", "note_date", "note_type", "snippet"}
+    missing = sorted(required - set(evidence_df.columns))
+    if missing:
+        raise ValueError(f"Evidence table missing required columns: {missing}")
+
+    patient_chunks = {}
+    invalid = 0
+    for row in evidence_df.iter_rows(named=True):
+        mrn = _to_int(row.get("DFCI_MRN"))
+        chunk_index = _to_int(row.get("chunk_index"))
+        snippet = row.get("snippet") or ""
+        if (
+            mrn is None
+            or chunk_index is None
+            or not 0 <= chunk_index <= MAX_CHUNK_INDEX
+            or not str(snippet).strip()
+        ):
+            invalid += 1
+            continue
+        patient_chunks.setdefault(mrn, {}).setdefault(chunk_index, []).append(
+            {
+                "note_date": row.get("note_date"),
+                "note_type": row.get("note_type") or "Unknown",
+                "snippet": snippet,
+            }
+        )
+    if invalid:
+        print(f"  Skipped {invalid} invalid evidence rows")
+    return patient_chunks
 
 
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    evidence_path = args.evidence_path or (args.output_dir / "gleason_evidence.tsv")
-    meta_path = args.output_dir / "gleason_evidence.meta.json"
-    raw_path = args.output_dir / "gleason_extractions_raw.tsv"
-    chunk_log_path = args.output_dir / "gleason_processed_chunks.tsv"
-    processed_path = args.output_dir / "gleason_processed_patients.tsv"
-    timeline_path = args.output_dir / "gleason_timeline.tsv"
+    evidence_path = args.evidence_path or (args.output_dir / "gleason_evidence.parquet")
+    meta_path = _meta_path_for_evidence(evidence_path)
+    raw_path = args.output_dir / "gleason_extractions_raw.parquet"
+    chunk_log_path = args.output_dir / "gleason_processed_chunks.parquet"
+    processed_path = args.output_dir / "gleason_processed_patients.parquet"
+    timeline_path = args.output_dir / "gleason_timeline.parquet"
+    run_meta_path = args.output_dir / "gleason_run.parquet"
 
     if not evidence_path.exists():
         raise FileNotFoundError(
@@ -503,16 +660,38 @@ def run(args):
         )
 
     if args.overwrite:
-        for path in (raw_path, chunk_log_path, processed_path, timeline_path):
+        for path in (
+            raw_path,
+            chunk_log_path,
+            processed_path,
+            timeline_path,
+            run_meta_path,
+        ):
             path.unlink(missing_ok=True)
 
-    # Must run BEFORE read_done_chunks: raises if the evidence file was
-    # regenerated with different scan params than the existing chunk log was
-    # built under (chunk_index would then mean something different), warns and
-    # proceeds if the evidence predates scan-config tracking (legacy data).
-    scan_config = check_scan_config(chunk_log_path, meta_path)
+    provider = get_provider(args.provider)
+    model = args.model or provider.default_model
+    run_config = _gleason_run_fingerprint(
+        evidence_path, args.provider, model
+    )
+    _validate_gleason_run(
+        run_meta_path,
+        run_config,
+        any(
+            path.exists()
+            for path in (raw_path, chunk_log_path, processed_path, timeline_path)
+        ),
+        args.overwrite,
+    )
 
-    evidence_df = pl.read_csv(evidence_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
+    # Must run before read_done_chunks: unverifiable or changed evidence cannot
+    # reuse persisted chunk indices.
+    scan_config = check_scan_config(
+        chunk_log_path, meta_path, evidence_path=evidence_path
+    )
+    print(f"Extraction fingerprint: {run_config} ({args.provider}/{model})")
+
+    evidence_df = pl.read_parquet(evidence_path)
     evidence_df = evidence_df.with_columns(
         pl.col("DFCI_MRN").cast(pl.Float64, strict=False).alias("DFCI_MRN")
     ).drop_nulls(subset=["DFCI_MRN"]).with_columns(
@@ -529,42 +708,7 @@ def run(args):
         print(f"After MRN filter: {evidence_df.height} snippets for "
               f"{evidence_df['DFCI_MRN'].n_unique()} patients")
 
-    patient_chunks = {}
-    bad_chunk_index = 0
-    for row in evidence_df.iter_rows(named=True):
-        mrn = int(row["DFCI_MRN"])
-        rec = {
-            "note_date": row.get("note_date"),
-            "note_type": row.get("note_type") or "Unknown",
-            "snippet": row.get("snippet") or "",
-        }
-        try:
-            chunk_index = int(row.get("chunk_index") or 0)
-        except (TypeError, ValueError):
-            bad_chunk_index += 1
-            continue
-        # A misaligned row (which truncate_ragged_lines lets through) can carry a
-        # nonsense chunk_index; without a bound the fill loop below would allocate
-        # that many empty lists.
-        if not 0 <= chunk_index <= MAX_CHUNK_INDEX:
-            bad_chunk_index += 1
-            continue
-        chunks = patient_chunks.setdefault(mrn, [])
-        while len(chunks) <= chunk_index:
-            chunks.append([])
-        chunks[chunk_index].append(rec)
-
-    if bad_chunk_index:
-        print(f"  Skipped {bad_chunk_index} evidence rows with an invalid chunk_index")
-
-    # Chunks are packed contiguously by collect_gleason_notes.py, but a filtered or
-    # partially-malformed evidence file can leave a hole; drop empties so they
-    # aren't dispatched as empty LLM calls.
-    patient_chunks = {
-        mrn: [c for c in chunks if c]
-        for mrn, chunks in patient_chunks.items()
-    }
-    patient_chunks = {mrn: chunks for mrn, chunks in patient_chunks.items() if chunks}
+    patient_chunks = _load_patient_chunks(evidence_df)
 
     total_chunks = sum(len(c) for c in patient_chunks.values())
     print(
@@ -574,16 +718,16 @@ def run(args):
 
     # Resume at chunk granularity: a patient whose chunk 2 failed re-runs only
     # chunk 2, keeping the findings chunks 0 and 1 already produced.
-    done_chunks = read_done_chunks(chunk_log_path)
+    done_chunks = read_done_chunks(chunk_log_path, run_config)
     if done_chunks:
         print(f"Already completed chunks: {len(done_chunks)}")
 
     todo = []
     for mrn in sorted(patient_chunks):
         outstanding = [
-            (i, chunk)
-            for i, chunk in enumerate(patient_chunks[mrn])
-            if (mrn, i) not in done_chunks
+            (chunk_index, chunk)
+            for chunk_index, chunk in sorted(patient_chunks[mrn].items())
+            if (mrn, chunk_index) not in done_chunks
         ]
         if outstanding:
             todo.append((mrn, outstanding))
@@ -596,8 +740,6 @@ def run(args):
     )
 
     if todo:
-        provider = get_provider(args.provider)
-        model = args.model or provider.default_model
         client = provider.build_client()
 
         def worker(mrn, indexed_chunks):
@@ -619,7 +761,15 @@ def run(args):
                 append_rows(raw_path, rows, RAW_COLUMNS)
                 append_rows(
                     chunk_log_path,
-                    [{"DFCI_MRN": int(mrn), "scan_config": scan_config, **r} for r in chunk_results],
+                    [
+                        {
+                            "DFCI_MRN": int(mrn),
+                            "scan_config": scan_config,
+                            "run_config": run_config,
+                            **r,
+                        }
+                        for r in chunk_results
+                    ],
                     CHUNK_COLUMNS,
                 )
                 n_total = len(patient_chunks[mrn])
@@ -646,6 +796,7 @@ def run(args):
                         "num_chunks_ok": n_ok,
                         "num_findings": len(rows),
                         "status": status,
+                        "run_config": run_config,
                     }],
                     PROCESSED_COLUMNS,
                 )

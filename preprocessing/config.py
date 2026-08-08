@@ -21,15 +21,42 @@ DEFAULT_OUTPUT_DIR = Path(
         ),
     )
 )
-DEFAULT_RAW_TEXT_PATHS = (
-    Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2024_03/"),
-    Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_03/"),
-    Path("/data/gusev/PROFILE/CLINICAL/OncDRS/CLINICAL_TEXTS_2025_11/"),
+PROFILE_DATA_PATH = Path(
+    os.environ.get("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA/")
 )
-NOTE_BUNDLE_FILENAME = "LLM_NEPC_classifier_note_bundle.json.gz"
-# Compiled prostate notes CSV (produced by preprocessing/cli/compile_prostate_notes.py).
-# This is the default note source for all LLM pipelines.
-PROSTATE_TEXT_CSV = DEFAULT_DATA_PATH / "prostate_text_data.csv"
+PROFILE_NOTES_PATH = PROFILE_DATA_PATH / "CLINICAL_NOTES"
+DEFAULT_PROFILE_NOTE_PATHS = tuple(
+    PROFILE_NOTES_PATH / filename
+    for filename in (
+        "PATHOLOGY_NOTES.parquet",
+        "IMAGING_NOTES.parquet",
+        "PROGRESS_NOTES.parquet",
+    )
+)
+NOTE_BUNDLE_FILENAME = "LLM_NEPC_classifier_note_bundle.parquet"
+PROSTATE_TEXT_PARQUET = DEFAULT_DATA_PATH / "prostate_text_data.parquet"
+
+# Native column order emitted by PROFILE_data_processing/compile_text_data.ipynb.
+# Pathology/imaging have already merged NARRATIVE_TEXT into RPT_TEXT upstream.
+PROFILE_PATH_IMAGE_COLUMNS = (
+    "RPT_ID",
+    "DFCI_MRN",
+    "EVENT_DATE",
+    "PROC_DESC",
+    "RPT_TYPE",
+    "RPT_TEXT",
+    "FILE",
+)
+PROFILE_PROGRESS_COLUMNS = (
+    "RPT_ID",
+    "DFCI_MRN",
+    "EVENT_DATE",
+    "INP_RPT_TYPE",
+    "PROVIDER_TYPE",
+    "ENCOUNTER_TYPE_DESC",
+    "RPT_TEXT",
+    "FILE",
+)
 
 NOTE_BUNDLE_COLUMNS = (
     "DFCI_MRN",
@@ -42,6 +69,7 @@ NOTE_BUNDLE_COLUMNS = (
     "RPT_TYPE",
     "SOURCE_STR",
     "PROC_DESC_STR",
+    "PROVIDER_TYPE_STR",
     "ENCOUNTER_TYPE_DESC_STR",
 )
 
@@ -70,6 +98,12 @@ inappropriate material - it is standard-of-care medical documentation.
 # default in dfci_gpt, which is the only value ever exercised by any live
 # dfci_gpt call site.
 SNIPPET_GAP_CHARS = 300
+
+# Evidence-sidecar contract versions. Bump these when collection semantics change
+# in a way that makes older Parquet evidence unsafe to resume (trigger coverage, cohort
+# requirements, or chunk assignment rules).
+GLEASON_EVIDENCE_SCHEMA_VERSION = "gleason-evidence-parquet-v3"
+LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION = "avpc-nepc-evidence-parquet-v3"
 
 
 @dataclass(frozen=True)

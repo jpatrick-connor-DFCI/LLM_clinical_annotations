@@ -7,49 +7,42 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import (  # noqa: E402
+    DEFAULT_PROFILE_NOTE_PATHS,
     DEFAULT_OUTPUT_DIR,
     NOTE_BUNDLE_FILENAME,
-    PROSTATE_TEXT_CSV,
 )
 from preprocessing.notes import (  # noqa: E402
     load_notes,
     load_selected_mrns,
-    resolve_raw_text_paths,
     write_note_bundle,
 )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Compile prostate notes for a prostate MRN list into a gzip JSON bundle "
-        "for binary_NEPC. Defaults to reading the compiled prostate_text_data.csv and "
-        "falls back to raw OncDRS notes if the CSV is unavailable."
+        description="Compile prostate notes for a prostate MRN list into a Parquet bundle "
+        "for binary_NEPC. Defaults to reading the merged PROFILE_DATA note parquets."
     )
     parser.add_argument(
         "--output-path",
         type=Path,
         default=DEFAULT_OUTPUT_DIR / NOTE_BUNDLE_FILENAME,
-        help="Destination gzip JSON note bundle to write.",
+        help="Destination Parquet note bundle to write.",
     )
     parser.add_argument(
-        "--notes-csv",
-        type=Path,
-        default=PROSTATE_TEXT_CSV,
-        help="Compiled prostate notes CSV to read by default.",
-    )
-    parser.add_argument(
-        "--raw-text-path",
+        "--notes-parquet",
         type=Path,
         action="append",
         default=None,
-        help="Raw OncDRS note directory fallback. Repeat to search multiple directories.",
+        help="PROFILE_DATA clinical-note parquet. Repeat for multiple files; defaults "
+        "to pathology, imaging, and progress notes.",
     )
     parser.add_argument("--mrns", default=None, help="Comma-separated DFCI_MRN values to include.")
     parser.add_argument(
         "--mrn-file",
         type=Path,
         default=None,
-        help="Text/CSV/TSV file containing the prostate DFCI_MRN values to compile.",
+        help="Parquet file containing the prostate DFCI_MRN values to compile.",
     )
     return parser.parse_args()
 
@@ -57,35 +50,28 @@ def main():
     args = parse_args()
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
 
-    raw_text_paths = resolve_raw_text_paths(args.raw_text_path)
+    parquet_paths = args.notes_parquet or DEFAULT_PROFILE_NOTE_PATHS
+    if selected_mrns is None:
+        raise ValueError(
+            "Compiling a prostate note bundle directly from PROFILE_DATA requires "
+            "--mrns or --mrn-file to define the prostate cohort."
+        )
     note_df = load_notes(
-        csv_path=args.notes_csv,
+        parquet_paths=parquet_paths,
         bundle_path=None,
-        raw_text_paths=raw_text_paths,
         selected_mrns=selected_mrns,
     )
-    if selected_mrns is None and not Path(args.notes_csv).exists():
-        raise ValueError(
-            "Raw-note fallback requires --mrns or --mrn-file. "
-            "Without an explicit MRN selection, --notes-csv must exist."
-        )
     write_note_bundle(
         args.output_path,
         note_df,
-        raw_text_paths=raw_text_paths,
         selected_mrns=selected_mrns,
     )
 
     print(f"Wrote compiled note bundle: {args.output_path}")
     print(f"Patients in bundle: {note_df['DFCI_MRN'].n_unique()}")
     print(f"Notes in bundle: {len(note_df)}")
-    print(
-        "Requested MRNs: all notes in CSV"
-        if selected_mrns is None
-        else f"Requested MRNs: {len(selected_mrns)}"
-    )
-    print(f"Notes CSV preferred: {args.notes_csv}")
-    print(f"Raw text directories fallback: {', '.join(str(path) for path in raw_text_paths)}")
+    print(f"Requested MRNs: {len(selected_mrns)}")
+    print(f"Note source: {', '.join(str(path) for path in parquet_paths)}")
 
 
 if __name__ == "__main__":

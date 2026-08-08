@@ -1,14 +1,14 @@
 """Stage 2 — Call the LLM on per-patient evidence chunks; write the stage timeline.
 
-Reads stage_evidence.tsv produced by extract_stage_notes.py. Groups snippets by
+Reads stage_evidence.parquet produced by extract_stage_notes.py. Groups snippets by
 patient into payload-sized chunks (chronological, greedy packing), calls the LLM
 once per chunk, and aggregates the findings into a deduped stage timeline.
 
 Outputs (under <output-dir>):
-  stage_extractions_raw.tsv      Per-finding extractions (one row per LLM finding,
+  stage_extractions_raw.parquet  Per-finding extractions (one row per LLM finding,
                                  pre-dedup, with rationale for auditing).
-  stage_processed_patients.tsv   Per-patient processing log (resumability + failures).
-  stage_timeline.tsv             Deduped stage timeline — one row per distinct staging
+  stage_processed_patients.parquet Per-patient processing log (resumability + failures).
+  stage_timeline.parquet         Deduped stage timeline — one row per distinct staging
                                  event per patient.
 
 Usage:
@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -36,8 +37,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import CLINICAL_SAFETY_CONTEXT, SNIPPET_PROFILES  # noqa: E402
-from preprocessing.longitudinal import flatten_ws, resolve_date  # noqa: E402
-from preprocessing.notes import load_selected_mrns  # noqa: E402
+from preprocessing.grounding import find_quote_support  # noqa: E402
+from preprocessing.longitudinal import (  # noqa: E402
+    file_sha256,
+    flatten_ws,
+    parse_stated_date,
+    resolve_date,
+)
+from preprocessing.notes import load_selected_mrns, to_iso_date  # noqa: E402
+from preprocessing.parquet_io import (  # noqa: E402
+    append_rows_atomic,
+    read_metadata,
+    write_metadata,
+    write_rows_atomic,
+)
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
 from tasks.cancer_stage.prompts import STAGE_SYSTEM_PROMPT  # noqa: E402
@@ -51,6 +64,8 @@ RAW_COLUMNS = [
     "DFCI_MRN",
     "source_note_date",
     "cancer_type",
+    "staging_system",
+    "stage_raw",
     "stage_group",
     "stage_date",
     "is_historical_reference",
@@ -62,6 +77,8 @@ RAW_COLUMNS = [
 TIMELINE_COLUMNS = [
     "DFCI_MRN",
     "cancer_type",
+    "staging_system",
+    "stage_raw",
     "stage_group",
     "stage_date",
     "date_source",
@@ -73,6 +90,7 @@ TIMELINE_COLUMNS = [
 ]
 
 PROCESSED_COLUMNS = ["DFCI_MRN", "num_chunks", "num_findings", "status"]
+STAGE_EXTRACTION_SCHEMA_VERSION = "cancer-stage-grounded-parquet-v3"
 
 
 def parse_args():
@@ -80,11 +98,11 @@ def parse_args():
         description="Call the LLM on stage evidence chunks and write a stage timeline."
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
-                        help="Directory containing stage_evidence.tsv and where outputs are written.")
+                        help="Directory containing stage_evidence.parquet and where outputs are written.")
     parser.add_argument("--evidence-path", type=Path, default=None,
-                        help="Override path to stage_evidence.tsv.")
+                        help="Override path to stage_evidence.parquet.")
     parser.add_argument("--mrn-file", type=Path, default=None,
-                        help="Process only these MRNs (file of MRNs or CSV with DFCI_MRN column).")
+                        help="Process only these MRNs (Parquet with a DFCI_MRN column).")
     parser.add_argument("--mrns", default=None,
                         help="Comma- or space-separated MRNs to process.")
     parser.add_argument("--payload-max-chars", type=int, default=DEFAULT_PAYLOAD_MAX_CHARS,
@@ -125,7 +143,11 @@ def group_evidence_chunks(evidence_df, payload_max_chars):
             "note_date": row.get("note_date"),
             "note_type": row.get("note_type") or "Unknown",
             "trigger_categories": (
-                str(trigger_categories).split(",") if trigger_categories else []
+                list(trigger_categories)
+                if isinstance(trigger_categories, (list, tuple))
+                else str(trigger_categories).split(",")
+                if trigger_categories
+                else []
             ),
             "snippet": row.get("snippet") or "",
         })
@@ -182,7 +204,11 @@ def extract_patient(provider, client, model, max_retries, mrn, chunks):
         chunk_findings = result.get("stage_findings")
         if not isinstance(chunk_findings, list):
             return None, "missing_stage_findings"
-        findings.extend(f for f in chunk_findings if isinstance(f, dict))
+        for finding in chunk_findings:
+            normalized, validation_error = validate_stage_finding(finding, chunk)
+            if validation_error:
+                return None, validation_error
+            findings.append(normalized)
     return findings, None
 
 
@@ -191,12 +217,78 @@ _WORD_TO_STAGE = {"ONE": "I", "TWO": "II", "THREE": "III", "FOUR": "IV"}
 
 
 def _normalize_stage_group(val):
-    """Normalize to I/II/III/IV; return None for substages, numerics, or unknown values."""
+    """Normalize base/substage Roman, Arabic, or word values to I/II/III/IV."""
     if not val:
         return None
     cleaned = re.sub(r"(?i)^stage\s+", "", str(val).strip()).upper()
+    match = re.match(r"^(IV|III|II|I|[1-4]|ONE|TWO|THREE|FOUR)", cleaned)
+    if not match:
+        return None
+    cleaned = match.group(1)
     cleaned = _WORD_TO_STAGE.get(cleaned, cleaned)
+    cleaned = {"1": "I", "2": "II", "3": "III", "4": "IV"}.get(cleaned, cleaned)
     return cleaned if cleaned in _VALID_STAGES else None
+
+
+def validate_stage_finding(finding, chunk):
+    """Validate one stage event and ground its quote/date in the current chunk."""
+    if not isinstance(finding, dict):
+        return None, "stage_finding_not_object"
+    cancer_type = finding.get("cancer_type")
+    if not isinstance(cancer_type, str) or not cancer_type.strip():
+        return None, "missing_cancer_type"
+    stage_raw = finding.get("stage_raw") or finding.get("stage_group")
+    if not isinstance(stage_raw, str) or not stage_raw.strip():
+        return None, "missing_stage_raw"
+    staging_system = finding.get("staging_system")
+    if staging_system is not None and not isinstance(staging_system, str):
+        return None, "invalid_staging_system"
+
+    supplied_group = finding.get("stage_group")
+    normalized_group = _normalize_stage_group(supplied_group) if supplied_group else None
+    if supplied_group not in (None, "") and normalized_group is None:
+        return None, f"invalid_stage_group:{supplied_group}"
+    raw_group = _normalize_stage_group(stage_raw)
+    if raw_group and normalized_group and raw_group != normalized_group:
+        return None, "stage_group_does_not_match_stage_raw"
+
+    claimed_source_date = finding.get("source_note_date")
+    source_note_date = to_iso_date(claimed_source_date)
+    if claimed_source_date not in (None, "", "null", "None") and source_note_date is None:
+        return None, f"invalid_source_note_date:{claimed_source_date}"
+    quote = finding.get("supporting_quote")
+    support = find_quote_support(quote, chunk, claimed_date=source_note_date)
+    if support is None or support.get("note_date") != source_note_date:
+        return None, "supporting_quote_or_source_date_not_in_evidence"
+
+    stage_date = finding.get("stage_date")
+    if stage_date not in (None, "", "null", "None"):
+        stated_iso, _ = parse_stated_date(stage_date)
+        if stated_iso is None:
+            return None, f"invalid_stage_date:{stage_date}"
+        if source_note_date and stated_iso > source_note_date:
+            return None, "stage_date_after_source_note"
+
+    if not isinstance(finding.get("is_historical_reference"), bool):
+        return None, "invalid_is_historical_reference"
+    if finding.get("confidence") not in {"high", "medium", "low"}:
+        return None, f"invalid_confidence:{finding.get('confidence')}"
+    rationale = finding.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        return None, "missing_rationale"
+
+    normalized = dict(finding)
+    normalized.update(
+        {
+            "cancer_type": cancer_type.strip(),
+            "staging_system": staging_system.strip() if staging_system else None,
+            "stage_raw": stage_raw.strip(),
+            "stage_group": normalized_group,
+            "source_note_date": source_note_date,
+            "supporting_quote": flatten_ws(quote),
+        }
+    )
+    return normalized, None
 
 
 def raw_rows_from_findings(mrn, findings):
@@ -206,7 +298,11 @@ def raw_rows_from_findings(mrn, findings):
             "DFCI_MRN": int(mrn),
             "source_note_date": finding.get("source_note_date"),
             "cancer_type": finding.get("cancer_type"),
-            "stage_group": _normalize_stage_group(finding.get("stage_group")),
+            "staging_system": finding.get("staging_system"),
+            "stage_raw": finding.get("stage_raw") or finding.get("stage_group"),
+            "stage_group": _normalize_stage_group(
+                finding.get("stage_group") or finding.get("stage_raw")
+            ),
             "stage_date": finding.get("stage_date"),
             "is_historical_reference": finding.get("is_historical_reference"),
             "supporting_quote": flatten_ws(finding.get("supporting_quote")),
@@ -217,18 +313,8 @@ def raw_rows_from_findings(mrn, findings):
 
 
 def append_rows(path, rows, columns):
-    """Append rows to a TSV, writing the header only on the first write.
-
-    Polars has no append mode for write_csv, so the CSV text is generated
-    in-memory and appended via a plain file handle.
-    """
-    if not rows:
-        return
-    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
-    write_header = not path.exists() or path.stat().st_size == 0
-    text = df.write_csv(separator="\t", include_header=write_header)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(text)
+    """Append a complete row batch to an atomic Parquet artifact."""
+    append_rows_atomic(path, rows, columns)
 
 
 def _str(val):
@@ -255,12 +341,10 @@ def _to_numeric_scalar(value):
 def build_timeline(raw_path, timeline_path):
     """Deduplicate raw findings into the stage timeline."""
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        pl.DataFrame(schema={c: pl.Utf8 for c in TIMELINE_COLUMNS}).write_csv(
-            timeline_path, separator="\t"
-        )
+        write_rows_atomic(timeline_path, [], TIMELINE_COLUMNS)
         return 0
 
-    raw = pl.read_csv(raw_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
+    raw = pl.read_parquet(raw_path)
     seen = set()
     rows = []
     for r in raw.iter_rows(named=True):
@@ -271,6 +355,8 @@ def build_timeline(raw_path, timeline_path):
 
         # Normalize dedup key fields so formatting differences don't create duplicates.
         cancer_type_raw = _str(r.get("cancer_type"))
+        staging_system_raw = _str(r.get("staging_system"))
+        stage_raw = _str(r.get("stage_raw"))
         stage_group_raw = _str(r.get("stage_group"))
 
         stage_date, date_source, date_precision = resolve_date(
@@ -280,6 +366,8 @@ def build_timeline(raw_path, timeline_path):
         key = (
             mrn,
             cancer_type_raw.lower() or None,
+            staging_system_raw.lower() or None,
+            stage_raw.lower() or None,
             stage_group_raw.upper() or None,
             stage_date,
         )
@@ -290,6 +378,8 @@ def build_timeline(raw_path, timeline_path):
         rows.append({
             "DFCI_MRN": mrn,
             "cancer_type": cancer_type_raw or None,
+            "staging_system": staging_system_raw or None,
+            "stage_raw": stage_raw or None,
             "stage_group": stage_group_raw or None,
             "stage_date": stage_date,
             "date_source": date_source,
@@ -305,7 +395,7 @@ def build_timeline(raw_path, timeline_path):
     else:
         timeline = pl.DataFrame({c: [row.get(c) for row in rows] for c in TIMELINE_COLUMNS})
         timeline = timeline.sort(
-            ["DFCI_MRN", "cancer_type", "stage_date"], nulls_last=True
+            ["DFCI_MRN", "cancer_type", "staging_system", "stage_date"], nulls_last=True
         )
         # Keep only rows where stage_group changes within each (patient, cancer_type).
         # This collapses repeated identical staging entries over time — once a stage
@@ -314,24 +404,68 @@ def build_timeline(raw_path, timeline_path):
         last_stage = {}
         keep_mask = []
         for row in timeline.iter_rows(named=True):
-            key = (row["DFCI_MRN"], (_str(row["cancer_type"])).lower())
-            curr = (_str(row["stage_group"])).upper()
+            key = (
+                row["DFCI_MRN"],
+                (_str(row["cancer_type"])).lower(),
+                (_str(row["staging_system"])).lower(),
+            )
+            curr = (
+                (_str(row["stage_group"])).upper(),
+                (_str(row["stage_raw"])).lower(),
+            )
             if last_stage.get(key) != curr:
                 keep_mask.append(True)
                 last_stage[key] = curr
             else:
                 keep_mask.append(False)
         timeline = timeline.filter(pl.Series(keep_mask))
-    timeline.write_csv(timeline_path, separator="\t")
+    write_rows_atomic(timeline_path, timeline.to_dicts(), TIMELINE_COLUMNS)
     return timeline.height
+
+
+def _stage_run_fingerprint(evidence_path, provider_name, model, payload_max_chars):
+    hasher = hashlib.sha256()
+    for value in (
+        file_sha256(evidence_path),
+        provider_name,
+        model,
+        STAGE_SYSTEM_PROMPT,
+        CLINICAL_SAFETY_CONTEXT,
+        STAGE_EXTRACTION_SCHEMA_VERSION,
+        json.dumps(RAW_COLUMNS),
+        json.dumps(TIMELINE_COLUMNS),
+        str(int(payload_max_chars)),
+    ):
+        hasher.update(value.encode("utf-8"))
+    return hasher.hexdigest()[:20]
+
+
+def _validate_stage_run(path, run_config, has_outputs, overwrite):
+    if overwrite or not has_outputs:
+        write_metadata(path, {"run_config": run_config})
+        return
+    if not path.exists():
+        raise ValueError(
+            "Existing staging outputs predate run fingerprinting. Re-run with --overwrite."
+        )
+    try:
+        recorded = (read_metadata(path) or {}).get("run_config")
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise ValueError(f"Invalid staging run metadata: {path}") from exc
+    if recorded != run_config:
+        raise ValueError(
+            f"Staging evidence/config changed ({recorded} != {run_config}). "
+            "Re-run with --overwrite."
+        )
 
 
 def run(args):
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    evidence_path = args.evidence_path or (args.output_dir / "stage_evidence.tsv")
-    raw_path = args.output_dir / "stage_extractions_raw.tsv"
-    processed_path = args.output_dir / "stage_processed_patients.tsv"
-    timeline_path = args.output_dir / "stage_timeline.tsv"
+    evidence_path = args.evidence_path or (args.output_dir / "stage_evidence.parquet")
+    raw_path = args.output_dir / "stage_extractions_raw.parquet"
+    processed_path = args.output_dir / "stage_processed_patients.parquet"
+    timeline_path = args.output_dir / "stage_timeline.parquet"
+    run_meta_path = args.output_dir / "stage_run.parquet"
 
     if not evidence_path.exists():
         raise FileNotFoundError(
@@ -340,10 +474,23 @@ def run(args):
         )
 
     if args.overwrite:
-        for path in (raw_path, processed_path, timeline_path):
+        for path in (raw_path, processed_path, timeline_path, run_meta_path):
             path.unlink(missing_ok=True)
 
-    evidence_df = pl.read_csv(evidence_path, separator="\t", infer_schema_length=0, truncate_ragged_lines=True)
+    provider = get_provider(args.provider)
+    model = args.model or provider.default_model
+    run_config = _stage_run_fingerprint(
+        evidence_path, args.provider, model, args.payload_max_chars
+    )
+    _validate_stage_run(
+        run_meta_path,
+        run_config,
+        any(path.exists() for path in (raw_path, processed_path, timeline_path)),
+        args.overwrite,
+    )
+    print(f"Extraction fingerprint: {run_config} ({args.provider}/{model})")
+
+    evidence_df = pl.read_parquet(evidence_path)
     evidence_df = evidence_df.with_columns(
         pl.col("DFCI_MRN").cast(pl.Float64, strict=False).alias("DFCI_MRN")
     ).drop_nulls(subset=["DFCI_MRN"]).with_columns(
@@ -369,7 +516,7 @@ def run(args):
 
     completed = set()
     if processed_path.exists() and processed_path.stat().st_size > 0:
-        log = pl.read_csv(processed_path, separator="\t")
+        log = pl.read_parquet(processed_path)
         completed = set(
             log.filter(pl.col("status") == "ok")["DFCI_MRN"].cast(pl.Int64).to_list()
         )
@@ -381,8 +528,6 @@ def run(args):
     print(f"Patients to extract with LLM: {len(todo)}")
 
     if todo:
-        provider = get_provider(args.provider)
-        model = args.model or provider.default_model
         client = provider.build_client()
 
         def worker(mrn):

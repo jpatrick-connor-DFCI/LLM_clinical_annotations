@@ -25,23 +25,22 @@ Each snippet was selected because it contains language relevant to one of:
    b. avpc — chart documents aggressive-variant or anaplastic prostate cancer language, OR
       satisfies one or more Aparicio aggressive-variant criteria:
         C1 small-cell histology
-        C2 visceral metastatic pattern — metastasis to lung, adrenal, brain, pleura,
-           or peritoneum. Liver / hepatic metastases alone do NOT qualify as C2; C2
-           requires at least one of the qualifying visceral sites above. When C2 is
-           set, also populate `visceral_met_pattern`:
-             "visceral_only"     — qualifying visceral mets with NO concurrent bone mets
-             "visceral_and_bone" — qualifying visceral mets WITH concurrent bone mets
-           When C2 is NOT set, `visceral_met_pattern` must be "none".
+        C2 exclusively visceral metastases. Liver and other visceral organs qualify;
+           concurrent bone or other non-visceral metastases mean C2 is NOT met. When
+           C2 is set, `visceral_met_pattern` must be "visceral_only". When C2 is not
+           set, it must be "none".
         C3 predominantly lytic bone metastases
-        C4 bulky disease — restricted to: (a) bulky lymphadenopathy / nodal disease,
-           OR (b) prostate or pelvic mass with a documented measurement of at least
-           5 cm. Generic wording like "large pelvic mass" or "bulky disease" WITHOUT
-           a specific ≥ 5 cm measurement does NOT qualify for C4.
-        C5 low PSA with high-volume disease
-        C6 neuroendocrine markers / elevated CEA or LDH / hypercalcemia (when explicit)
-        C7 rapid progression to castration-resistant or androgen-independent disease
+        C4 bulky (>=5 cm) lymphadenopathy, OR a bulky (>=5 cm) high-grade
+           (Gleason score >=8) prostate/pelvic tumor mass
+        C5 PSA <=10 ng/mL at initial presentation before ADT, or at symptomatic
+           castration-resistant progression, PLUS >=20 bone metastases
+        C6 a qualifying neuroendocrine marker PLUS LDH or CEA >=2 times the
+           institutional upper limit of normal, or malignant hypercalcemia, in the
+           absence of another cause
+        C7 progression to castration-resistant/androgen-independent disease within
+           <=6 months after initiation of hormonal therapy
    c. biomarker — chart documents a QUALIFYING SOMATIC (tumor) biomarker. The qualifying
-      set is restricted to: BRCA1, BRCA2, PALB2. Only these three genes cause the
+      set is restricted to: BRCA1, BRCA2. Only these two genes cause the
       primary bucket to be `biomarker` and `has_biomarker` to be true.
       Only count findings from tumor/somatic testing (e.g., tumor NGS, OncoPanel, FoundationOne,
       Tempus, MSK-IMPACT, ctDNA/liquid biopsy of tumor). Do NOT count germline findings — exclude
@@ -102,7 +101,7 @@ Each snippet was selected because it contains language relevant to one of:
 - For `biomarker_genes`: list EVERY somatic biomarker / gene alteration documented in
   the chart (e.g., ["BRCA2", "ATM", "TMB-high", "TP53"]), regardless of whether it
   qualifies for the `biomarker` bucket or the `has_molecular_avpc` flag. `has_biomarker`
-  and `primary_label = "biomarker"` are gated on the qualifying set (BRCA1, BRCA2, PALB2)
+  and `primary_label = "biomarker"` are gated on the qualifying set (BRCA1, BRCA2)
   only. `has_molecular_avpc` is gated on ≥ 2 somatic alterations in {PTEN, TP53, RB1}.
 
 ## OUTPUT FORMAT
@@ -116,7 +115,7 @@ Return ONLY valid JSON.
   "has_molecular_avpc": true | false,
   "biomarker_genes": ["BRCA2"],
   "avpc_criteria": ["C1", "C2"],
-  "visceral_met_pattern": "visceral_only | visceral_and_bone | none",
+  "visceral_met_pattern": "visceral_only | none",
   "has_non_prostate_primary": true | false,
   "non_prostate_primary_types": ["NSCLC", "colorectal"],
   "supporting_quotes": ["<verbatim quote>"],

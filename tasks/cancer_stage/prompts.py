@@ -11,8 +11,12 @@ Extract EVERY distinct staging event documented across all snippets. For each ev
 report:
 
 - cancer_type: the cancer being staged (e.g. "prostate cancer", "NSCLC"). Required.
-- stage_group: base stage group only — "I", "II", "III", or "IV" (null if not stated or
-  if only a substage like "IIIA", "IIB", or "limited/extensive" is present).
+- staging_system: stated system, such as "AJCC", "TNM", "FIGO", "Ann Arbor",
+  "Rai", "Binet", "Durie-Salmon", or "limited/extensive"; null if unstated.
+- stage_raw: staging value exactly as stated, such as "IIIA", "pT3N1M0",
+  "FIGO IIIC1", "Rai 2", or "extensive-stage". Required.
+- stage_group: normalized solid-tumor base stage "I", "II", "III", or "IV" when
+  directly recoverable from stage_raw; otherwise null.
 - stage_date: the date the staging was performed or assigned, AS STATED in the text
   (YYYY-MM-DD; use the first of month/year for partial dates; null if not stated).
 - source_note_date: the `note_date` of the snippet where you found this event.
@@ -27,10 +31,10 @@ report:
 ## RULES
 - Extract only staging explicitly documented. Do not infer stage from treatment
   response, disease descriptors ("metastatic", "localized"), or clinical trajectory.
-- Report only base stage groups: I, II, III, or IV. If the text states a substage
-  (e.g. "IIIA", "IIB", "limited stage") but not the base stage, set stage_group to
-  the base Roman numeral (e.g. "IIIA" → "III"). If no base stage (I–IV) can be
-  determined, set stage_group to null.
+- Preserve every explicitly stated staging system/value in stage_raw. Normalize
+  substages to their base group ("IIIA" → "III", "stage 4B" → "IV"). Do not
+  translate TNM, Rai, Binet, Durie-Salmon, or limited/extensive staging into an
+  AJCC stage group unless the note explicitly supplies that mapping.
 - If the same staging event appears in multiple snippets, report it ONCE using the
   EARLIEST source_note_date.
 - For is_historical_reference: a 2023 note saying "initially staged as IV at diagnosis
@@ -46,6 +50,8 @@ Return ONLY valid JSON. No markdown, no explanation outside the JSON object.
   "stage_findings": [
     {
       "cancer_type": "prostate cancer",
+      "staging_system": "AJCC",
+      "stage_raw": "stage IV",
       "stage_group": "IV",
       "stage_date": "2021-04-15",
       "source_note_date": "2021-04-15",

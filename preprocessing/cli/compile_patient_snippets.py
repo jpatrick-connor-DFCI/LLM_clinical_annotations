@@ -12,9 +12,15 @@ from preprocessing.bundles.snippet_bundle import (  # noqa: E402
     SNIPPET_BUNDLE_FILENAME,
     write_snippet_bundle,
 )
-from preprocessing.config import DEFAULT_OUTPUT_DIR, PROSTATE_TEXT_CSV, SNIPPET_PROFILES  # noqa: E402
-from preprocessing.notes import load_notes, load_selected_mrns, resolve_note_source  # noqa: E402
+from preprocessing.config import DEFAULT_OUTPUT_DIR, DEFAULT_PROFILE_NOTE_PATHS, SNIPPET_PROFILES  # noqa: E402
+from preprocessing.notes import (  # noqa: E402
+    load_notes,
+    load_profile_note_mrns,
+    load_selected_mrns,
+    resolve_note_source,
+)
 from preprocessing.snippets import build_patient_snippets  # noqa: E402
+from preprocessing.triggers import TRIGGER_REGEX, combined_text_pattern  # noqa: E402
 
 _PROFILE = SNIPPET_PROFILES["binary_nepc"]
 
@@ -28,9 +34,15 @@ def parse_args():
     )
     parser.add_argument("--mrn-file", type=Path, default=None)
     parser.add_argument("--mrns", default=None)
-    parser.add_argument("--notes-csv", type=Path, default=PROSTATE_TEXT_CSV)
-    parser.add_argument("--note-bundle-path", type=Path, default=None)
-    parser.add_argument("--raw-text-path", type=Path, action="append", default=None)
+    parser.add_argument("--notes-parquet", type=Path, action="append", default=None,
+                        help="PROFILE_DATA clinical-note parquet. Repeat for multiple files; "
+                             "defaults to pathology, imaging, and progress notes.")
+    parser.add_argument(
+        "--note-bundle-path",
+        type=Path,
+        default=None,
+        help="Standardized Parquet note bundle override.",
+    )
     parser.add_argument(
         "--output-path",
         type=Path,
@@ -59,25 +71,35 @@ def run(args):
         )
 
     selected_mrns = load_selected_mrns(args.mrns, args.mrn_file)
+    parquet_paths = (
+        args.notes_parquet or DEFAULT_PROFILE_NOTE_PATHS
+        if args.note_bundle_path is None
+        else None
+    )
+    if parquet_paths is not None and selected_mrns is None:
+        raise ValueError(
+            "Binary NEPC is prostate-specific. Direct PROFILE_DATA parquet runs "
+            "require --mrns or --mrn-file to define the prostate cohort."
+        )
     source_label, source_path = resolve_note_source(
-        csv_path=args.notes_csv,
+        parquet_paths=parquet_paths,
         bundle_path=args.note_bundle_path,
     )
-    print(
-        "Note source: raw OncDRS JSONs"
-        if source_path is None
-        else f"Note source: {source_label} ({source_path})"
-    )
+    print(f"Note source: {source_label} ({source_path})")
 
     notes_df = load_notes(
-        csv_path=args.notes_csv,
+        parquet_paths=parquet_paths,
         bundle_path=args.note_bundle_path,
-        raw_text_paths=args.raw_text_path,
         selected_mrns=selected_mrns,
+        text_pattern=combined_text_pattern(TRIGGER_REGEX),
     )
-    all_mrns = {
-        int(mrn) for mrn in notes_df["DFCI_MRN"].unique().drop_nulls().to_list()
-    }
+    patients_with_notes = (
+        load_profile_note_mrns(parquet_paths, selected_mrns)
+        if parquet_paths is not None
+        else {int(mrn) for mrn in notes_df["DFCI_MRN"].unique().drop_nulls().to_list()}
+    )
+    all_mrns = set(selected_mrns) if selected_mrns is not None else patients_with_notes
+    no_note_mrns = all_mrns - patients_with_notes
     print(f"Loaded notes: {len(notes_df)} rows for {len(all_mrns)} patients")
 
     patient_snippets = build_patient_snippets(
@@ -97,12 +119,15 @@ def run(args):
             "note_source_path": None if source_path is None else str(source_path),
             "max_notes_per_patient": args.max_notes_per_patient,
             "scan_workers": args.scan_workers,
+            "patients_with_notes": sorted(patients_with_notes),
+            "no_note_mrns": sorted(no_note_mrns),
         },
     )
 
     print(f"Wrote patient snippet bundle: {args.output_path}")
     print(f"Patients with triggered snippets: {len(patient_snippets)}")
     print(f"Patients with no signal: {len(all_mrns - set(patient_snippets))}")
+    print(f"Patients with no notes: {len(no_note_mrns)}")
     print(f"Total saved snippets: {sum(map(len, patient_snippets.values()))}")
 
 

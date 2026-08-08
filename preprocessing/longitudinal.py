@@ -7,7 +7,6 @@ snippets into one or more payload-sized chunks for a single LLM call per chunk.
 """
 
 import hashlib
-import json
 import math
 import re
 from datetime import datetime
@@ -17,16 +16,17 @@ from dateutil import parser as date_parser
 
 from preprocessing.config import SNIPPET_PROFILES
 from preprocessing.notes import to_iso_date
+from preprocessing.parquet_io import read_metadata, write_metadata
 from preprocessing.snippets import scan_note_candidates
 
 _LONGITUDINAL_PROFILE = SNIPPET_PROFILES["longitudinal"]
 
 
 def flatten_ws(value):
-    """Collapse tabs/newlines/whitespace runs to single spaces for safe TSV storage.
+    """Collapse tabs/newlines/whitespace runs to stable one-line audit text.
 
-    Free-text fields (verbatim quotes) can contain tabs or newlines that would shift
-    columns / split rows in a tab-separated file; flattening them keeps the TSV aligned.
+    This keeps quote comparison and review displays consistent while the original
+    structured rows remain safely stored in Parquet.
     """
     if value is None:
         return None
@@ -301,7 +301,7 @@ def evidence_scan_config_key(
     payload_max_chars,
     note_types=None,
 ):
-    """Fingerprint every RESOLVED setting that determines evidence-TSV chunk assignment.
+    """Fingerprint every RESOLVED setting that determines evidence chunk assignment.
 
     Modeled on `_snippet_cache_key` in `preprocessing/snippets.py`: hashes the
     (mrn, date, type, text) content of every note plus every parameter that
@@ -348,26 +348,19 @@ def file_sha256(path):
 
 
 def write_scan_config_meta(meta_path, scan_config, **extra):
-    """Write the sidecar recording the scan_config hash an evidence TSV was built under.
+    """Write the Parquet sidecar recording an evidence scan configuration.
 
     `extra` fields (e.g. context_chars, payload_max_chars) are informational
     only — never read back for comparison, so they can't create a second,
     inconsistent notion of "changed". Only `scan_config` is authoritative.
     """
     payload = {"scan_config": scan_config, **extra}
-    tmp_path = meta_path.with_name(f".{meta_path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp_path.replace(meta_path)
+    write_metadata(meta_path, payload)
 
 
 def read_scan_config_meta(meta_path):
-    """Read an evidence meta sidecar; return None if it doesn't exist (legacy evidence)."""
-    if not meta_path.exists():
-        return None
-    try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    """Read an evidence Parquet sidecar; return None when absent or invalid."""
+    return read_metadata(meta_path)
 
 
 def derive_grade_group(primary, secondary):

@@ -1,22 +1,20 @@
-"""MRN parsing and note loading: raw OncDRS JSON, gzip bundle, or compiled CSV."""
+"""MRN parsing and note loading from PROFILE_DATA or derived Parquet artifacts."""
 
-import gzip
-import json
 import math
-import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
 from dateutil import parser as date_parser
 
-try:
-    import ijson
-except ImportError:
-    ijson = None
-
-from preprocessing.config import DEFAULT_RAW_TEXT_PATHS, NOTE_BUNDLE_COLUMNS, PROSTATE_TEXT_CSV
+from preprocessing.config import (
+    DEFAULT_PROFILE_NOTE_PATHS,
+    NOTE_BUNDLE_COLUMNS,
+    PROFILE_PATH_IMAGE_COLUMNS,
+    PROFILE_PROGRESS_COLUMNS,
+)
+from preprocessing.parquet_io import write_parquet_atomic
 
 
 def _is_missing(value):
@@ -59,16 +57,13 @@ def load_selected_mrns(mrns_arg=None, mrn_file=None):
     if mrn_file:
         mrn_file = Path(mrn_file)
         suffix = mrn_file.suffix.lower()
-        if suffix in {".csv", ".tsv"}:
-            sep = "\t" if suffix == ".tsv" else ","
-            mrn_df = pl.read_csv(mrn_file, separator=sep, infer_schema_length=None)
-            if "DFCI_MRN" in mrn_df.columns:
-                selected.update(parse_mrn_values(mrn_df["DFCI_MRN"].to_list()))
-            elif mrn_df.height > 0:
-                selected.update(parse_mrn_values(mrn_df[:, 0].to_list()))
-        else:
-            with open(mrn_file, "r", encoding="utf-8") as handle:
-                selected.update(parse_mrn_values(handle.readlines()))
+        if suffix != ".parquet":
+            raise ValueError(f"MRN cohort file must be Parquet: {mrn_file}")
+        mrn_df = pl.read_parquet(mrn_file)
+        if "DFCI_MRN" in mrn_df.columns:
+            selected.update(parse_mrn_values(mrn_df["DFCI_MRN"].to_list()))
+        elif mrn_df.height > 0:
+            selected.update(parse_mrn_values(mrn_df[:, 0].to_list()))
     return selected or None
 
 
@@ -132,127 +127,6 @@ def to_iso_date(value):
     return parsed.strftime("%Y-%m-%d")
 
 
-# Raw / bundle loaders
-def infer_note_type_from_filename(path):
-    name = Path(path).name.lower()
-    if "imaging" in name:
-        return "Imaging"
-    if "prognote" in name or "progress" in name or "clinic" in name:
-        return "Clinician"
-    if "pathology" in name or re.search(r"(^|[-_])path(?:[-_.]|$)", name):
-        return "Pathology"
-    return None
-
-
-def discover_raw_text_files(raw_text_paths):
-    discovered = []
-    seen = set()
-    for raw_text_path in raw_text_paths:
-        raw_text_path = Path(raw_text_path)
-        if not raw_text_path.exists():
-            continue
-        for path in sorted(raw_text_path.rglob("*.json")):
-            note_type = infer_note_type_from_filename(path)
-            if note_type is not None and str(path) not in seen:
-                seen.add(str(path))
-                discovered.append((path, note_type))
-    return discovered
-
-
-def extract_raw_docs(payload):
-    if isinstance(payload, dict):
-        response = payload.get("response")
-        if isinstance(response, dict) and isinstance(response.get("docs"), list):
-            return response["docs"]
-        if isinstance(payload.get("docs"), list):
-            return payload["docs"]
-    if isinstance(payload, list):
-        return payload
-    return []
-
-
-def iter_raw_docs_from_file(path):
-    if ijson is None:
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        yield from extract_raw_docs(payload)
-        return
-
-    with open(path, "r", encoding="utf-8") as handle:
-        for prefix in ("response.docs.item", "docs.item", "item"):
-            handle.seek(0)
-            try:
-                iterator = ijson.items(handle, prefix)
-                first = next(iterator, None)
-            except ijson.JSONError:
-                continue
-            if first is None:
-                continue
-            yield first
-            yield from iterator
-            return
-
-
-def build_raw_note_row(note, note_type, source_file):
-    mrn = _to_numeric_scalar(note.get("DFCI_MRN"))
-    if mrn is None:
-        return None
-    text_entries = [v for k, v in note.items() if "TEXT" in str(k).upper()]
-    text = basic_clean_text(" ".join(deduplicate_texts(text_entries)))
-    if not text:
-        return None
-    return {
-        "DFCI_MRN": int(mrn),
-        "EVENT_DATE": note.get("EVENT_DATE") or note.get("RPT_DATE"),
-        "NOTE_TYPE": note_type,
-        "CLINICAL_TEXT": text,
-        "RAW_SOURCE_FILE": Path(source_file).name,
-        "RAW_NOTE_ID": note.get("id"),
-        "RPT_DATE": note.get("RPT_DATE"),
-        "RPT_TYPE": note.get("RPT_TYPE"),
-        "SOURCE_STR": note.get("SOURCE_STR"),
-        "PROC_DESC_STR": note.get("PROC_DESC_STR"),
-        "ENCOUNTER_TYPE_DESC_STR": note.get("ENCOUNTER_TYPE_DESC_STR"),
-    }
-
-
-def resolve_raw_text_paths(raw_text_paths_arg=None):
-    if not raw_text_paths_arg:
-        return list(DEFAULT_RAW_TEXT_PATHS)
-    seen, paths = set(), []
-    for path in raw_text_paths_arg:
-        normalized = Path(path)
-        key = str(normalized)
-        if key not in seen:
-            seen.add(key)
-            paths.append(normalized)
-    return paths
-
-
-def load_raw_text_notes(raw_text_paths, selected_mrns):
-    if selected_mrns is None:
-        raise ValueError("Raw text mode requires --mrns or --mrn-file.")
-    raw_files = discover_raw_text_files(raw_text_paths)
-    if not raw_files:
-        joined = ", ".join(str(p) for p in raw_text_paths)
-        raise FileNotFoundError(f"No supported raw JSON note files found under: {joined}")
-    rows = []
-    for file_path, note_type in raw_files:
-        for note in iter_raw_docs_from_file(file_path):
-            mrn = _to_numeric_scalar(note.get("DFCI_MRN"))
-            if mrn is None or int(mrn) not in selected_mrns:
-                continue
-            row = build_raw_note_row(note, note_type, file_path)
-            if row is not None:
-                rows.append(row)
-    if not rows:
-        raise ValueError("No raw notes were found for the requested MRNs.")
-    df = normalize_mrn_column(pl.DataFrame(rows, infer_schema_length=None))
-    if df.is_empty():
-        raise ValueError("No raw notes were found for the requested MRNs.")
-    return df
-
-
 def _standardize_note_df(note_df):
     """Select bundle columns, normalize EVENT_DATE to ISO strings, sort deterministically."""
     if note_df.is_empty():
@@ -260,7 +134,7 @@ def _standardize_note_df(note_df):
     keep_cols = [c for c in NOTE_BUNDLE_COLUMNS if c in note_df.columns]
     standardized = note_df.select(keep_cols)
     if "EVENT_DATE" in standardized.columns:
-        # OncDRS EVENT_DATE/RPT_DATE values are ISO datetime strings that may carry a
+        # PROFILE EVENT_DATE values are ISO datetime strings that may carry a
         # timezone offset (e.g. "2021-03-14T00:00:00-05:00"). Polars refuses to infer a
         # format when a timezone is present, and we only want the calendar date anyway,
         # so extract the leading YYYY-MM-DD directly rather than parsing to a datetime.
@@ -276,28 +150,16 @@ def _standardize_note_df(note_df):
     return standardized
 
 
-def write_note_bundle(path, note_df, *, raw_text_paths=None, selected_mrns=None):
+def write_note_bundle(path, note_df, *, selected_mrns=None):
+    """Write standardized notes as a Parquet bundle."""
     standardized = _standardize_note_df(note_df)
-    payload = {
-        "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "requested_mrn_count": len(selected_mrns) if selected_mrns is not None else None,
-        "patient_count": int(standardized["DFCI_MRN"].n_unique()) if not standardized.is_empty() else 0,
-        "note_count": int(standardized.height),
-        "raw_text_paths": [str(p) for p in raw_text_paths] if raw_text_paths else None,
-        "notes": standardized.to_dicts() if not standardized.is_empty() else [],
-    }
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(output_path, "wt", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False)
+    write_parquet_atomic(standardized, path)
 
 
-def write_notes_csv(path, note_df):
-    """Write standardized note rows to a CSV (the default LLM-pipeline note source)."""
+def write_notes_parquet(path, note_df):
+    """Write standardized note rows to a Parquet artifact."""
     standardized = _standardize_note_df(note_df)
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    standardized.write_csv(output_path)
+    write_parquet_atomic(standardized, path)
     return standardized
 
 
@@ -305,15 +167,10 @@ def load_note_bundle(path, selected_mrns=None):
     bundle_path = Path(path)
     if not bundle_path.exists():
         raise FileNotFoundError(f"Note bundle not found: {bundle_path}")
-    with gzip.open(bundle_path, "rt", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if isinstance(payload, dict):
-        records = payload.get("notes", [])
-    elif isinstance(payload, list):
-        records = payload
-    else:
-        records = []
-    df = normalize_mrn_column(pl.DataFrame(records, infer_schema_length=None) if records else pl.DataFrame())
+    try:
+        df = normalize_mrn_column(pl.read_parquet(bundle_path))
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise ValueError(f"Invalid note Parquet bundle: {bundle_path}") from exc
     if df.is_empty():
         raise ValueError(f"No note rows in bundle: {bundle_path}")
     if selected_mrns is not None:
@@ -323,60 +180,169 @@ def load_note_bundle(path, selected_mrns=None):
     return df
 
 
-def load_notes_csv(csv_path, selected_mrns=None):
-    """Load the compiled prostate notes CSV produced by compile_prostate_notes.py.
-
-    Uses a lazy scan so the MRN filter (when given) is pushed down during the
-    multi-threaded CSV read instead of materializing the full file first.
-    """
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Prostate notes CSV not found: {csv_path}")
-    # Read every known column as Utf8 rather than scanning the whole file to infer
-    # types (infer_schema_length=None). The snippet builder treats all fields as
-    # strings anyway, and DFCI_MRN is normalized numerically downstream, so a fixed
-    # Utf8 schema is both faster to load and safe. Unknown columns still infer.
-    lazy = pl.scan_csv(
-        csv_path,
-        schema_overrides={c: pl.Utf8 for c in NOTE_BUNDLE_COLUMNS},
-        infer_schema_length=1000,
+def _profile_note_type(path):
+    """Map a PROFILE_DATA clinical-note parquet basename to our note taxonomy."""
+    name = Path(path).stem.upper()
+    if name == "PATHOLOGY_NOTES":
+        return "Pathology"
+    if name == "IMAGING_NOTES":
+        return "Imaging"
+    if name == "PROGRESS_NOTES":
+        return "Clinician"
+    raise ValueError(
+        f"Unsupported PROFILE_DATA note parquet: {path}. Expected one of "
+        "PATHOLOGY_NOTES.parquet, IMAGING_NOTES.parquet, or PROGRESS_NOTES.parquet."
     )
-    if "CLINICAL_TEXT" not in lazy.collect_schema().names():
-        raise ValueError(f"Prostate notes CSV missing CLINICAL_TEXT column: {csv_path}")
-    if selected_mrns is not None:
-        lazy = lazy.filter(
-            pl.col("DFCI_MRN").cast(pl.Float64, strict=False).cast(pl.Int64, strict=False).is_in(selected_mrns)
+
+
+def load_profile_note_mrns(parquet_paths=None, selected_mrns=None):
+    """Return patients with at least one note without reading any text columns."""
+    paths = [Path(path) for path in (parquet_paths or DEFAULT_PROFILE_NOTE_PATHS)]
+    frames = []
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(f"PROFILE_DATA note parquet not found: {path}")
+        lazy = pl.scan_parquet(path).select(
+            pl.col("DFCI_MRN").cast(pl.Int64, strict=False)
         )
-    df = normalize_mrn_column(lazy.collect())
-    if df.is_empty():
-        raise ValueError(f"No note rows in CSV: {csv_path}")
-    return df
+        if selected_mrns is not None:
+            lazy = lazy.filter(pl.col("DFCI_MRN").is_in(selected_mrns))
+        frames.append(lazy)
+    if not frames:
+        return set()
+    mrns = (
+        pl.concat(frames, how="vertical_relaxed")
+        .drop_nulls()
+        .unique()
+        .collect()["DFCI_MRN"]
+        .to_list()
+    )
+    return {int(mrn) for mrn in mrns}
 
 
-def resolve_note_source(*, csv_path=None, bundle_path=None):
+def load_profile_notes(
+    parquet_paths=None, selected_mrns=None, text_pattern=None, note_types=None
+):
+    """Load and standardize the merged PROFILE_DATA clinical-note parquets.
+
+    The three source files have slightly different metadata columns. They are
+    emitted by PROFILE_data_processing with NARRATIVE_TEXT already merged into
+    RPT_TEXT for pathology/imaging. This loader maps that native schema to the
+    common note shape consumed by every annotation pipeline. Optional MRN and
+    regex predicates are applied lazily before materialization.
+    """
+    paths = [Path(path) for path in (parquet_paths or DEFAULT_PROFILE_NOTE_PATHS)]
+    if not paths:
+        raise ValueError("At least one PROFILE_DATA note parquet is required.")
+
+    wanted_note_types = (
+        {str(value).strip().lower() for value in note_types} if note_types else None
+    )
+    frames = []
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(f"PROFILE_DATA note parquet not found: {path}")
+        note_type = _profile_note_type(path)
+        if wanted_note_types is not None and note_type.lower() not in wanted_note_types:
+            continue
+        lazy = pl.scan_parquet(path)
+        columns = set(lazy.collect_schema().names())
+        expected = (
+            PROFILE_PROGRESS_COLUMNS
+            if note_type == "Clinician"
+            else PROFILE_PATH_IMAGE_COLUMNS
+        )
+        required = set(expected)
+        missing = required - columns
+        if missing:
+            raise ValueError(
+                f"PROFILE_DATA note parquet {path} is missing columns: {sorted(missing)}"
+            )
+        if selected_mrns is not None:
+            lazy = lazy.filter(pl.col("DFCI_MRN").cast(pl.Int64, strict=False).is_in(selected_mrns))
+
+        if text_pattern:
+            lazy = lazy.filter(
+                pl.col("RPT_TEXT").cast(pl.Utf8).str.contains(text_pattern)
+            )
+        clinical_text = pl.col("RPT_TEXT").fill_null("").str.strip_chars()
+
+        def source_col(name, fallback_name=None):
+            if name in columns:
+                return pl.col(name).cast(pl.Utf8)
+            if fallback_name in columns:
+                return pl.col(fallback_name).cast(pl.Utf8)
+            return pl.lit(None, dtype=pl.Utf8)
+
+        frames.append(
+            lazy.select(
+                pl.col("DFCI_MRN").cast(pl.Int64, strict=False),
+                pl.col("EVENT_DATE").cast(pl.Utf8),
+                pl.lit(note_type).alias("NOTE_TYPE"),
+                clinical_text.alias("CLINICAL_TEXT"),
+                source_col("FILE").alias("RAW_SOURCE_FILE"),
+                source_col("RPT_ID").alias("RAW_NOTE_ID"),
+                pl.col("EVENT_DATE").cast(pl.Utf8).alias("RPT_DATE"),
+                source_col("RPT_TYPE", "INP_RPT_TYPE").alias("RPT_TYPE"),
+                pl.lit(None, dtype=pl.Utf8).alias("SOURCE_STR"),
+                source_col("PROC_DESC").alias("PROC_DESC_STR"),
+                source_col("PROVIDER_TYPE").alias("PROVIDER_TYPE_STR"),
+                source_col("ENCOUNTER_TYPE_DESC").alias("ENCOUNTER_TYPE_DESC_STR"),
+            ).filter(pl.col("DFCI_MRN").is_not_null() & (pl.col("CLINICAL_TEXT") != ""))
+        )
+
+    if not frames:
+        return pl.DataFrame(schema={c: pl.Utf8 for c in NOTE_BUNDLE_COLUMNS})
+    df = pl.concat(frames, how="vertical_relaxed").collect()
+    df = normalize_mrn_column(df)
+    if df.is_empty() and text_pattern is None:
+        raise ValueError("No note rows found in the selected PROFILE_DATA parquets.")
+    return _standardize_note_df(df)
+
+
+def resolve_note_source(*, parquet_paths=None, bundle_path=None):
     """Return (source_label, source_path) for the note source load_notes would pick.
 
     Mirrors load_notes' precedence without reading the data, so callers can log
-    which source is in use before paying to load it. The raw-JSON path is much
-    slower than the CSV/bundle, so surfacing an accidental fall-through matters.
+    which source is in use before paying to load it.
     """
-    if bundle_path is not None and Path(bundle_path).exists():
-        return "bundle", Path(bundle_path)
-    csv_path = csv_path or PROSTATE_TEXT_CSV
-    if Path(csv_path).exists():
-        return "csv", Path(csv_path)
-    return "raw_json", None
+    if parquet_paths:
+        return "profile_parquet", tuple(Path(path) for path in parquet_paths)
+    if bundle_path is not None:
+        bundle_path = Path(bundle_path)
+        if not bundle_path.exists():
+            raise FileNotFoundError(f"Explicit note bundle not found: {bundle_path}")
+        return "bundle", bundle_path
+    return "profile_parquet", DEFAULT_PROFILE_NOTE_PATHS
 
 
-def load_notes(*, csv_path=None, bundle_path=None, raw_text_paths=None, selected_mrns=None):
-    """Load prostate notes for the LLM pipelines.
+def load_notes(
+    *, parquet_paths=None, bundle_path=None, selected_mrns=None,
+    text_pattern=None, note_types=None
+):
+    """Load clinical notes for the LLM pipelines.
 
-    Precedence: an explicitly-provided bundle that exists > the compiled
-    prostate_text_data.csv > raw OncDRS JSONs. The CSV is the default source.
+    Precedence: explicit PROFILE parquet > standardized Parquet bundle > the
+    three default PROFILE_DATA parquets.
     """
-    if bundle_path is not None and Path(bundle_path).exists():
-        return load_note_bundle(bundle_path, selected_mrns)
-    csv_path = csv_path or PROSTATE_TEXT_CSV
-    if Path(csv_path).exists():
-        return load_notes_csv(csv_path, selected_mrns)
-    return load_raw_text_notes(resolve_raw_text_paths(raw_text_paths), selected_mrns)
+    if parquet_paths:
+        return load_profile_notes(
+            parquet_paths, selected_mrns, text_pattern=text_pattern,
+            note_types=note_types,
+        )
+    if bundle_path is not None:
+        bundle_path = Path(bundle_path)
+        if not bundle_path.exists():
+            raise FileNotFoundError(f"Explicit note bundle not found: {bundle_path}")
+        notes = load_note_bundle(bundle_path, selected_mrns)
+    else:
+        return load_profile_notes(
+            DEFAULT_PROFILE_NOTE_PATHS, selected_mrns, text_pattern,
+            note_types=note_types,
+        )
+    if note_types:
+        wanted = {str(value).strip().lower() for value in note_types}
+        notes = notes.filter(
+            pl.col("NOTE_TYPE").cast(pl.Utf8).str.to_lowercase().is_in(wanted)
+        )
+    return notes

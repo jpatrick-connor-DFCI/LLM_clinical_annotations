@@ -30,7 +30,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from preprocessing.config import CLINICAL_SAFETY_CONTEXT, DEFAULT_DATA_PATH  # noqa: E402
+from preprocessing.config import (  # noqa: E402
+    CLINICAL_SAFETY_CONTEXT,
+    DEFAULT_DATA_PATH,
+    LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+)
 from preprocessing.longitudinal import (  # noqa: E402
     flatten_ws,
     file_sha256,
@@ -39,6 +43,10 @@ from preprocessing.longitudinal import (  # noqa: E402
     resolve_date,
 )
 from preprocessing.notes import load_selected_mrns, to_iso_date  # noqa: E402
+from preprocessing.parquet_io import (  # noqa: E402
+    append_rows_atomic,
+    write_rows_atomic,
+)
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
 from tasks.longitudinal_NEPC.prompts import (  # noqa: E402
@@ -268,30 +276,18 @@ def parse_args():
 
 
 def append_rows(path, rows, columns):
-    """Append complete TSV records; callers compact them atomically afterward."""
-    if not rows:
-        return
-    df = pl.DataFrame({c: [r.get(c) for r in rows] for c in columns})
-    write_header = not path.exists() or path.stat().st_size == 0
-    text = df.write_csv(separator="\t", include_header=write_header)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(text)
+    """Append complete Parquet records; callers compact them afterward."""
+    append_rows_atomic(path, rows, columns)
 
 
 def _write_rows_atomic(path, rows, columns):
-    if rows:
-        df = pl.DataFrame({c: [row.get(c) for row in rows] for c in columns})
-    else:
-        df = pl.DataFrame(schema={c: pl.Utf8 for c in columns})
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    df.write_csv(tmp_path, separator="\t")
-    tmp_path.replace(path)
+    write_rows_atomic(path, rows, columns)
 
 
 def compact_log(path, columns, key_columns):
     if not path.exists() or path.stat().st_size == 0:
         return
-    log = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    log = pl.read_parquet(path)
     if not all(c in log.columns for c in key_columns):
         return
     compacted = log.unique(subset=key_columns, keep="last", maintain_order=True)
@@ -312,12 +308,7 @@ def _to_exact_int(value):
 
 
 def _meta_path_for_evidence(evidence_path):
-    name = evidence_path.name
-    if name.endswith(".tsv"):
-        name = f"{name[:-4]}.meta.json"
-    else:
-        name = f"{name}.meta.json"
-    return evidence_path.with_name(name)
+    return evidence_path.with_name(f"{evidence_path.stem}.meta.parquet")
 
 
 def extraction_run_config(scan_config, provider_name, model):
@@ -344,6 +335,14 @@ def check_resume_config(
             f"Evidence metadata is missing or invalid: {meta_path}. "
             "Regenerate evidence so its content/configuration can be verified."
         )
+    if (
+        meta.get("evidence_schema_version")
+        != LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "AVPC/NEPC evidence predates the current trigger/cohort contract. "
+            "Regenerate evidence with --overwrite."
+        )
     if evidence_path is not None:
         recorded_digest = meta.get("evidence_sha256")
         actual_digest = file_sha256(evidence_path)
@@ -356,7 +355,7 @@ def check_resume_config(
     if not chunk_log_path.exists() or chunk_log_path.stat().st_size == 0:
         return scan_config, run_config
 
-    log = pl.read_csv(chunk_log_path, separator="\t", infer_schema_length=0)
+    log = pl.read_parquet(chunk_log_path)
     required = {"scan_config", "run_config"}
     if not required.issubset(log.columns):
         raise ValueError(
@@ -380,7 +379,7 @@ def check_resume_config(
 def read_done_chunks(path, run_config=None):
     if not path.exists() or path.stat().st_size == 0:
         return set()
-    log = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    log = pl.read_parquet(path)
     required = {"DFCI_MRN", "chunk_index", "status"}
     if not required.issubset(log.columns):
         return set()
@@ -813,7 +812,7 @@ def _load_chunk_outputs(path, run_config):
     outputs = {}
     if not path.exists() or path.stat().st_size == 0:
         return outputs
-    log = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    log = pl.read_parquet(path)
     for row in log.iter_rows(named=True):
         if row.get("status") not in SUCCESS_STATUSES or row.get("run_config") != run_config:
             continue
@@ -833,7 +832,7 @@ def _load_chunk_statuses(path, run_config):
     statuses = {}
     if not path.exists() or path.stat().st_size == 0:
         return statuses
-    log = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    log = pl.read_parquet(path)
     for row in log.iter_rows(named=True):
         if row.get("run_config") != run_config:
             continue
@@ -848,7 +847,7 @@ def _load_completed_syntheses(path, run_config):
     completed = {}
     if not path.exists() or path.stat().st_size == 0:
         return completed
-    log = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    log = pl.read_parquet(path)
     for row in log.iter_rows(named=True):
         if row.get("status") not in SUCCESS_STATUSES or row.get("run_config") != run_config:
             continue
@@ -886,7 +885,7 @@ def rebuild_rejected_findings(
             )
 
     if chunk_log_path.exists() and chunk_log_path.stat().st_size > 0:
-        log = pl.read_csv(chunk_log_path, separator="\t", infer_schema_length=0)
+        log = pl.read_parquet(chunk_log_path)
         for row in log.iter_rows(named=True):
             if row.get("run_config") != run_config or not row.get("result_json"):
                 continue
@@ -901,7 +900,7 @@ def rebuild_rejected_findings(
             add_rejections(mrn, "map", chunk_index, result)
 
     if processed_path.exists() and processed_path.stat().st_size > 0:
-        log = pl.read_csv(processed_path, separator="\t", infer_schema_length=0)
+        log = pl.read_parquet(processed_path)
         for row in log.iter_rows(named=True):
             if row.get("run_config") != run_config or not row.get("result_json"):
                 continue
@@ -1010,7 +1009,7 @@ def build_timeline(raw_path, timeline_path):
     if not raw_path.exists() or raw_path.stat().st_size == 0:
         _write_rows_atomic(timeline_path, [], TIMELINE_COLUMNS)
         return 0
-    raw = pl.read_csv(raw_path, separator="\t", infer_schema_length=0)
+    raw = pl.read_parquet(raw_path)
     onsets = {}
     skipped = 0
     for row in raw.iter_rows(named=True):
@@ -1061,7 +1060,7 @@ def build_timeline(raw_path, timeline_path):
             cumulative.update(item["criterion_added"] for item in same_date)
             for item in same_date:
                 row = dict(item)
-                row["cumulative_criteria"] = " | ".join(sorted(cumulative))
+                row["cumulative_criteria"] = sorted(cumulative)
                 row["num_criteria_to_date"] = len(cumulative)
                 output.append(row)
     _write_rows_atomic(timeline_path, output, TIMELINE_COLUMNS)
@@ -1106,15 +1105,15 @@ def run(args):
     if args.limit_patients is not None and args.limit_patients < 0:
         raise ValueError("limit_patients must be >= 0")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    evidence_path = args.evidence_path or (args.output_dir / "avpc_nepc_evidence.tsv")
+    evidence_path = args.evidence_path or (args.output_dir / "avpc_nepc_evidence.parquet")
     meta_path = getattr(args, "evidence_meta_path", None) or _meta_path_for_evidence(
         evidence_path
     )
-    raw_path = args.output_dir / "avpc_nepc_extractions_raw.tsv"
-    chunk_log_path = args.output_dir / "avpc_nepc_processed_chunks.tsv"
-    processed_path = args.output_dir / "avpc_nepc_processed_patients.tsv"
-    timeline_path = args.output_dir / "avpc_nepc_timeline.tsv"
-    rejected_path = args.output_dir / "avpc_nepc_rejected_findings.tsv"
+    raw_path = args.output_dir / "avpc_nepc_extractions_raw.parquet"
+    chunk_log_path = args.output_dir / "avpc_nepc_processed_chunks.parquet"
+    processed_path = args.output_dir / "avpc_nepc_processed_patients.parquet"
+    timeline_path = args.output_dir / "avpc_nepc_timeline.parquet"
+    rejected_path = args.output_dir / "avpc_nepc_rejected_findings.parquet"
 
     if not evidence_path.exists():
         raise FileNotFoundError(
@@ -1138,7 +1137,7 @@ def run(args):
     )
     print(f"Extraction fingerprint: {run_config} ({args.provider}/{model})")
 
-    evidence_df = pl.read_csv(evidence_path, separator="\t", infer_schema_length=0)
+    evidence_df = pl.read_parquet(evidence_path)
     patient_chunks = _load_patient_chunks(evidence_df)
     print(
         f"Loaded evidence: {evidence_df.height} rows for {len(patient_chunks)} patients "

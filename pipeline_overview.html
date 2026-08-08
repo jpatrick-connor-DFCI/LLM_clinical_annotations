@@ -1,0 +1,1312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Clinical Annotation Pipelines — Complete Technical Overview</title>
+  <style>
+    :root {
+      --ink: #17233b;
+      --muted: #607089;
+      --paper: #f6f8fc;
+      --surface: #ffffff;
+      --line: #dce3ee;
+      --navy: #172a4a;
+      --navy-2: #203b66;
+      --blue: #2563eb;
+      --blue-soft: #eaf1ff;
+      --teal: #0f766e;
+      --teal-soft: #e6f6f3;
+      --violet: #7c3aed;
+      --violet-soft: #f1eafe;
+      --amber: #b45309;
+      --amber-soft: #fff4df;
+      --rose: #be123c;
+      --rose-soft: #ffe9ef;
+      --green: #15803d;
+      --green-soft: #eaf8ef;
+      --shadow: 0 12px 34px rgba(23, 42, 74, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    code {
+      padding: 0.12rem 0.34rem;
+      border-radius: 5px;
+      background: #edf1f7;
+      color: #273650;
+      font-size: 0.9em;
+      overflow-wrap: anywhere;
+    }
+    pre {
+      margin: 0;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      border: 1px solid #293f63;
+      border-radius: 12px;
+      color: #e9f1ff;
+      background: #152640;
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+    pre code { padding: 0; color: inherit; background: transparent; }
+    h1, h2, h3, h4 { line-height: 1.18; letter-spacing: -0.02em; }
+    h1 { margin: 0 0 0.9rem; font-size: clamp(2.25rem, 6vw, 4.9rem); max-width: 980px; }
+    h2 { margin: 0; font-size: clamp(1.65rem, 3vw, 2.5rem); }
+    h3 { margin: 0 0 0.8rem; font-size: 1.22rem; }
+    h4 { margin: 0 0 0.45rem; font-size: 1rem; }
+    p { margin: 0 0 0.9rem; }
+    ul, ol { margin: 0.45rem 0 0; padding-left: 1.25rem; }
+    li + li { margin-top: 0.38rem; }
+
+    .hero {
+      color: #fff;
+      background:
+        radial-gradient(circle at 88% 18%, rgba(94, 234, 212, 0.20), transparent 28%),
+        radial-gradient(circle at 15% 95%, rgba(96, 165, 250, 0.22), transparent 32%),
+        linear-gradient(135deg, #101d33 0%, #1b3358 58%, #21446f 100%);
+      padding: 4.8rem max(1.25rem, calc((100vw - 1200px) / 2)) 3.7rem;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      margin-bottom: 1.1rem;
+      color: #b9d8ff;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      width: 28px;
+      height: 2px;
+      content: "";
+      background: #5eead4;
+    }
+    .hero p {
+      max-width: 810px;
+      color: #d7e5f8;
+      font-size: 1.08rem;
+    }
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 1.7rem;
+    }
+    .hero-meta span {
+      padding: 0.44rem 0.72rem;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 999px;
+      color: #e7f0ff;
+      background: rgba(255, 255, 255, 0.07);
+      font-size: 0.82rem;
+    }
+
+    .topnav {
+      position: sticky;
+      z-index: 50;
+      top: 0;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(14px);
+    }
+    .topnav-inner {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      max-width: 1200px;
+      min-height: 58px;
+      margin: 0 auto;
+      padding: 0.55rem 1.25rem;
+      overflow-x: auto;
+    }
+    .topnav a {
+      flex: 0 0 auto;
+      padding: 0.48rem 0.72rem;
+      border-radius: 8px;
+      color: #43516a;
+      font-size: 0.84rem;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .topnav a:hover { color: var(--navy); background: #edf2f8; }
+
+    main { max-width: 1200px; margin: 0 auto; padding: 3.3rem 1.25rem 5rem; }
+    section, article { scroll-margin-top: 82px; }
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 0.6fr);
+      gap: 2rem;
+      align-items: end;
+      margin-bottom: 1.5rem;
+    }
+    .section-head p { margin: 0; color: var(--muted); }
+    .kicker {
+      margin-bottom: 0.55rem;
+      color: var(--blue);
+      font-size: 0.76rem;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .section-block { margin-top: 4.8rem; }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .card-pad { padding: 1.35rem; }
+    .grid-2, .grid-3, .grid-4 {
+      display: grid;
+      gap: 1rem;
+    }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .metric {
+      padding: 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+    .metric .value { display: block; margin-bottom: 0.18rem; font-size: 1.4rem; font-weight: 850; }
+    .metric .label { color: var(--muted); font-size: 0.84rem; }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { padding: 0.78rem 0.85rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th {
+      color: #45536b;
+      background: #f2f5fa;
+      font-size: 0.73rem;
+      font-weight: 850;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #fafcff; }
+    td:first-child { font-weight: 650; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.7rem;
+      margin: 1.2rem 0;
+    }
+    .flow-step {
+      position: relative;
+      min-height: 126px;
+      padding: 0.9rem;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #fff;
+    }
+    .flow-step:not(:last-child)::after {
+      position: absolute;
+      z-index: 2;
+      top: 46%;
+      right: -0.56rem;
+      width: 0.5rem;
+      height: 0.5rem;
+      content: "";
+      border-top: 2px solid #9aabc1;
+      border-right: 2px solid #9aabc1;
+      transform: rotate(45deg);
+      background: var(--paper);
+    }
+    .step-no {
+      display: inline-grid;
+      width: 1.65rem;
+      height: 1.65rem;
+      margin-bottom: 0.58rem;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--blue);
+      font-size: 0.72rem;
+      font-weight: 850;
+    }
+    .flow-step strong { display: block; margin-bottom: 0.25rem; font-size: 0.88rem; }
+    .flow-step span { display: block; color: var(--muted); font-size: 0.77rem; line-height: 1.4; }
+
+    .pipeline {
+      margin-top: 5.5rem;
+      padding-top: 0.25rem;
+    }
+    .pipeline-banner {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+      gap: 1.4rem;
+      padding: 1.55rem;
+      border: 1px solid var(--line);
+      border-left: 7px solid var(--accent);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, #fff, var(--tint));
+      box-shadow: var(--shadow);
+    }
+    .pipeline-banner p { max-width: 710px; color: var(--muted); }
+    .pipeline-id {
+      display: inline-flex;
+      margin-bottom: 0.7rem;
+      padding: 0.28rem 0.58rem;
+      border-radius: 7px;
+      color: var(--accent);
+      background: var(--tint);
+      font-size: 0.72rem;
+      font-weight: 850;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .pipeline-facts {
+      display: grid;
+      align-content: start;
+      gap: 0.55rem;
+      padding: 0.95rem;
+      border: 1px solid rgba(23, 35, 59, 0.10);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.72);
+    }
+    .fact-row { display: grid; grid-template-columns: 92px 1fr; gap: 0.7rem; font-size: 0.82rem; }
+    .fact-row b { color: #526179; font-size: 0.69rem; letter-spacing: 0.06em; text-transform: uppercase; }
+    .binary { --accent: var(--blue); --tint: var(--blue-soft); }
+    .long-nepc { --accent: var(--violet); --tint: var(--violet-soft); }
+    .stage { --accent: var(--teal); --tint: var(--teal-soft); }
+    .gleason { --accent: var(--amber); --tint: var(--amber-soft); }
+
+    .subsection { margin-top: 2.15rem; }
+    .subsection-title {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.85rem;
+    }
+    .subsection-title::before {
+      width: 6px;
+      height: 22px;
+      border-radius: 5px;
+      content: "";
+      background: var(--accent, var(--blue));
+    }
+    .subsection-title h3 { margin: 0; }
+
+    .callout {
+      padding: 1rem 1.1rem;
+      border: 1px solid #cfd9e7;
+      border-left: 5px solid var(--blue);
+      border-radius: 12px;
+      background: #f7faff;
+      color: #32425b;
+      font-size: 0.89rem;
+    }
+    .callout strong { color: var(--ink); }
+    .callout.warn { border-left-color: var(--amber); background: var(--amber-soft); }
+    .callout.good { border-left-color: var(--green); background: var(--green-soft); }
+    .callout.rose { border-left-color: var(--rose); background: var(--rose-soft); }
+
+    .steps {
+      display: grid;
+      gap: 0.8rem;
+      counter-reset: process;
+    }
+    .process-step {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 0.8rem;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #fff;
+    }
+    .process-step::before {
+      display: grid;
+      width: 2rem;
+      height: 2rem;
+      place-items: center;
+      border-radius: 50%;
+      content: counter(process);
+      counter-increment: process;
+      color: #fff;
+      background: var(--accent, var(--blue));
+      font-size: 0.78rem;
+      font-weight: 850;
+    }
+    .process-step p { margin: 0; color: var(--muted); font-size: 0.87rem; }
+    .process-step strong { display: block; margin-bottom: 0.2rem; color: var(--ink); }
+
+    .pill-list { display: flex; flex-wrap: wrap; gap: 0.42rem; }
+    .pill {
+      display: inline-flex;
+      padding: 0.3rem 0.55rem;
+      border: 1px solid #d7dfeb;
+      border-radius: 999px;
+      color: #42516a;
+      background: #f9fbfd;
+      font-size: 0.76rem;
+      font-weight: 650;
+    }
+    .schema {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.55rem;
+    }
+    .field {
+      padding: 0.72rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+    }
+    .field code { display: inline-block; margin-bottom: 0.28rem; color: var(--navy); font-weight: 750; }
+    .field p { margin: 0; color: var(--muted); font-size: 0.8rem; }
+    .tag {
+      display: inline-flex;
+      margin-left: 0.35rem;
+      padding: 0.12rem 0.38rem;
+      border-radius: 999px;
+      color: #53627a;
+      background: #edf1f6;
+      font-size: 0.61rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    details {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    details + details { margin-top: 0.65rem; }
+    summary {
+      padding: 0.9rem 1rem;
+      cursor: pointer;
+      color: var(--ink);
+      font-weight: 780;
+    }
+    .details-body { padding: 0 1rem 1rem; color: var(--muted); font-size: 0.88rem; }
+    .details-body p:last-child { margin-bottom: 0; }
+    .filemap { font-size: 0.83rem; }
+    .filemap td:first-child { white-space: nowrap; }
+    .footer {
+      padding: 2rem 1.25rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      background: #fff;
+      text-align: center;
+      font-size: 0.82rem;
+    }
+
+    @media (max-width: 920px) {
+      .section-head, .pipeline-banner { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr 1fr; }
+      .flow-step:not(:last-child)::after { display: none; }
+      .grid-4 { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 660px) {
+      .hero { padding-top: 3.6rem; }
+      main { padding-inline: 0.85rem; }
+      .grid-2, .grid-3, .grid-4, .schema, .flow { grid-template-columns: 1fr; }
+      .pipeline-banner { padding: 1.1rem; }
+      th, td { padding: 0.68rem; }
+    }
+    @media print {
+      body { background: #fff; font-size: 10pt; }
+      .topnav { display: none; }
+      .hero { padding: 2rem; background: var(--navy); }
+      main { max-width: none; padding: 1rem; }
+      .card, .table-wrap, .pipeline-banner { box-shadow: none; break-inside: avoid; }
+      .pipeline { break-before: page; }
+      a { color: inherit; text-decoration: none; }
+      details { break-inside: avoid; }
+      details > * { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="eyebrow">LLM clinical annotations</div>
+    <h1>Four pipelines, from clinical notes to auditable annotations</h1>
+    <p>
+      A code-derived overview of the binary NEPC classifier, longitudinal AVPC/NEPC
+      timeline, pan-cancer stage timeline, and Gleason timeline. This document covers
+      the complete data path: source selection, cohort constraints, trigger scanning,
+      evidence construction, LLM extraction, validation, resumability, and final files.
+    </p>
+    <div class="hero-meta">
+      <span>Current implementation</span>
+      <span>PROFILE_DATA parquet inputs</span>
+      <span>DFCI GPT + Vertex AI</span>
+      <span>Grounded output validation</span>
+      <span>Updated 2026-08-08</span>
+    </div>
+  </header>
+
+  <nav class="topnav" aria-label="Page sections">
+    <div class="topnav-inner">
+      <a href="#at-a-glance">At a glance</a>
+      <a href="#shared-foundation">Shared foundation</a>
+      <a href="#binary-nepc">Binary NEPC</a>
+      <a href="#longitudinal-nepc">Longitudinal AVPC/NEPC</a>
+      <a href="#cancer-stage">Cancer stage</a>
+      <a href="#gleason">Gleason</a>
+      <a href="#operations">Operations</a>
+      <a href="#code-map">Code map</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="at-a-glance">
+      <div class="section-head">
+        <div>
+          <div class="kicker">System map</div>
+          <h2>At a glance</h2>
+        </div>
+        <p>
+          All four pipelines share the same standardized clinical-note layer and provider
+          abstraction, but differ in cohort scope, evidence selection, call unit, and
+          aggregation strategy.
+        </p>
+      </div>
+
+      <div class="grid-4">
+        <div class="metric"><span class="value">4</span><span class="label">annotation pipelines</span></div>
+        <div class="metric"><span class="value">3</span><span class="label">default note parquets</span></div>
+        <div class="metric"><span class="value">2</span><span class="label">interchangeable LLM providers</span></div>
+        <div class="metric"><span class="value">2-phase</span><span class="label">evidence first, extraction second</span></div>
+      </div>
+
+      <div class="table-wrap" style="margin-top:1rem">
+        <table>
+          <thead>
+            <tr>
+              <th>Pipeline</th>
+              <th>Cohort</th>
+              <th>Evidence strategy</th>
+              <th>LLM call unit</th>
+              <th>Primary product</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><a href="#binary-nepc">Binary NEPC</a></td>
+              <td>Prostate-specific; MRN cohort required for direct parquet scans</td>
+              <td>Combined NEPC, AVPC, biomarker, and second-primary triggers; ranked/capped snippets</td>
+              <td>One call per triggered patient</td>
+              <td>One classification row per cohort patient</td>
+            </tr>
+            <tr>
+              <td><a href="#longitudinal-nepc">Longitudinal AVPC/NEPC</a></td>
+              <td>Prostate-specific; MRN cohort required for direct parquet scans</td>
+              <td>NEPC/AVPC triggers plus atomic facts needed for composite Aparicio criteria</td>
+              <td>Map call per chunk + synthesis call per patient</td>
+              <td>Cumulative criterion-onset timeline</td>
+            </tr>
+            <tr>
+              <td><a href="#cancer-stage">Cancer stage</a></td>
+              <td>Pan-cancer by default; optional MRN restriction</td>
+              <td>Stage-group and named-system trigger families</td>
+              <td>One call per patient chunk</td>
+              <td>Deduplicated stage-change timeline</td>
+            </tr>
+            <tr>
+              <td><a href="#gleason">Gleason</a></td>
+              <td>Prostate-specific; MRN cohort required for direct parquet scans</td>
+              <td>Gleason, Grade Group, and ISUP mentions</td>
+              <td>One call per persisted evidence chunk</td>
+              <td>Score/grade-group timeline</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="shared-foundation" class="section-block">
+      <div class="section-head">
+        <div>
+          <div class="kicker">Shared layer</div>
+          <h2>Data foundation used by every pipeline</h2>
+        </div>
+        <p>
+          Preprocessing is provider-independent. Raw note access, cleaning, candidate
+          selection, and evidence persistence happen before any model client is built.
+        </p>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Default raw inputs</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Source</th><th>Standard note type</th><th>Default location</th></tr></thead>
+            <tbody>
+              <tr><td><code>PATHOLOGY_NOTES.parquet</code></td><td>Pathology</td><td><code>$PROFILE_DATA_PATH/CLINICAL_NOTES/</code></td></tr>
+              <tr><td><code>IMAGING_NOTES.parquet</code></td><td>Imaging</td><td><code>$PROFILE_DATA_PATH/CLINICAL_NOTES/</code></td></tr>
+              <tr><td><code>PROGRESS_NOTES.parquet</code></td><td>Clinician</td><td><code>$PROFILE_DATA_PATH/CLINICAL_NOTES/</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout" style="margin-top:0.85rem">
+          <strong>Text contract.</strong> <code>RPT_TEXT</code> is the complete canonical note
+          body. <code>PROFILE_data_processing</code> has already merged the source narrative
+          into this field before writing these Parquets; downstream code neither requires nor
+          appends a separate narrative column.
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Canonical PROFILE note record columns</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Source Parquet</th><th>Columns emitted by PROFILE_data_processing</th></tr></thead>
+            <tbody>
+              <tr><td><code>PATHOLOGY_NOTES.parquet</code><br><code>IMAGING_NOTES.parquet</code></td><td><code>RPT_ID</code>, <code>DFCI_MRN</code>, <code>EVENT_DATE</code>, <code>PROC_DESC</code>, <code>RPT_TYPE</code>, <code>RPT_TEXT</code>, <code>FILE</code></td></tr>
+              <tr><td><code>PROGRESS_NOTES.parquet</code></td><td><code>RPT_ID</code>, <code>DFCI_MRN</code>, <code>EVENT_DATE</code>, <code>INP_RPT_TYPE</code>, <code>PROVIDER_TYPE</code>, <code>ENCOUNTER_TYPE_DESC</code>, <code>RPT_TEXT</code>, <code>FILE</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="subsection-title" style="margin-top:1rem"><h3>Normalized in-memory projection</h3></div>
+        <div class="schema">
+          <div class="field"><code>DFCI_MRN</code><span class="tag">required</span><p>Normalized to a non-null 64-bit integer patient identifier.</p></div>
+          <div class="field"><code>EVENT_DATE</code><span class="tag">required</span><p>Normalized to the leading ISO calendar date, <code>YYYY-MM-DD</code>.</p></div>
+          <div class="field"><code>NOTE_TYPE</code><p>Mapped from source filename to Pathology, Imaging, or Clinician.</p></div>
+          <div class="field"><code>CLINICAL_TEXT</code><p>Directly mapped from the canonical source <code>RPT_TEXT</code>.</p></div>
+          <div class="field"><code>RAW_SOURCE_FILE</code><p>Directly mapped from source <code>FILE</code>.</p></div>
+          <div class="field"><code>RAW_NOTE_ID</code><p>Directly mapped from source <code>RPT_ID</code>.</p></div>
+          <div class="field"><code>RPT_DATE / RPT_TYPE</code><p><code>EVENT_DATE</code> plus <code>RPT_TYPE</code> or <code>INP_RPT_TYPE</code>.</p></div>
+          <div class="field"><code>PROC_DESC_STR / PROVIDER_TYPE_STR / ENCOUNTER_TYPE_DESC_STR</code><p>Source-specific metadata retained in a common shape.</p></div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Source resolution and scan behavior</h3></div>
+        <div class="grid-2">
+          <div class="card card-pad">
+            <h3>Source precedence</h3>
+            <ol>
+              <li>Explicit repeated <code>--notes-parquet</code> paths</li>
+              <li>Explicit standardized Parquet note bundle</li>
+              <li>The three default PROFILE_DATA parquets</li>
+            </ol>
+            <p style="margin-top:0.8rem;color:var(--muted);font-size:0.86rem">
+              Explicit missing bundles raise immediately; they do not silently fall through
+              to another source.
+            </p>
+          </div>
+          <div class="card card-pad">
+            <h3>Pushdown before materialization</h3>
+            <ul>
+              <li>Optional MRN cohort filter</li>
+              <li>Optional note-type filter</li>
+              <li>Pipeline-specific combined trigger regex over available text columns</li>
+            </ul>
+            <p style="margin-top:0.8rem;color:var(--muted);font-size:0.86rem">
+              The lazy Polars scan limits the rows and text loaded into memory before CPU-heavy
+              cleaning and snippet construction.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout good subsection">
+        <strong>Parquet storage contract.</strong> Every repository-owned evidence, bundle,
+        metadata, progress, failure, rejection, raw-result, label, and timeline artifact is
+        written atomically as Zstandard-compressed Parquet. List-valued fields remain native
+        Parquet lists. JSON is used only for provider messages or retained inside an explicit
+        audit-value column, never as the file transport.
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Shared preprocessing sequence</h3></div>
+        <div class="flow">
+          <div class="flow-step"><span class="step-no">1</span><strong>Load</strong><span>Select note source, MRNs, note types, and trigger-bearing parquet rows.</span></div>
+          <div class="flow-step"><span class="step-no">2</span><strong>Standardize</strong><span>Normalize MRNs/dates/types, map <code>RPT_TEXT</code>, and preserve provenance.</span></div>
+          <div class="flow-step"><span class="step-no">3</span><strong>Clean + scan</strong><span>Clean each note and locate labeled regex matches in parallel processes.</span></div>
+          <div class="flow-step"><span class="step-no">4</span><strong>Window</strong><span>Expand around matches and merge windows separated by at most 300 characters.</span></div>
+          <div class="flow-step"><span class="step-no">5</span><strong>Persist</strong><span>Rank or chunk per-patient evidence and atomically write a reusable artifact.</span></div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Shared LLM and validation layer</h3></div>
+        <div class="grid-3">
+          <div class="card card-pad">
+            <h3>Provider adapters</h3>
+            <p>Both backends implement <code>build_client()</code> and <code>call_with_retry()</code>.</p>
+            <div class="pill-list">
+              <span class="pill">DFCI Azure OpenAI</span>
+              <span class="pill">Google Vertex AI</span>
+              <span class="pill">temperature = 0</span>
+            </div>
+          </div>
+          <div class="card card-pad">
+            <h3>Response handling</h3>
+            <p>The shared parser accepts clean JSON, fenced JSON, the first complete JSON value, trailing-comma repair, and limited repair of unescaped quotes.</p>
+          </div>
+          <div class="card card-pad">
+            <h3>Grounding</h3>
+            <p>Verbatim quotes are normalized for harmless typography and must be found in supplied evidence. Claimed source dates are checked against the supporting snippet.</p>
+          </div>
+        </div>
+        <div class="callout good" style="margin-top:0.9rem">
+          <strong>Clinical context.</strong> Every system prompt is paired with a shared
+          IRB-approved clinical-research safety preamble. No raw-note preprocessing module
+          imports an LLM provider SDK.
+        </div>
+      </div>
+    </section>
+
+    <article id="binary-nepc" class="pipeline binary">
+      <div class="pipeline-banner">
+        <div>
+          <span class="pipeline-id">Pipeline 01 · patient classifier</span>
+          <h2>Binary NEPC classification</h2>
+          <p>
+            Assigns one primary prostate-cancer phenotype per cohort patient while also
+            retaining independent AVPC, molecular AVPC, biomarker, and non-prostate-primary
+            flags. Trigger-free patients are handled deterministically without an LLM call.
+          </p>
+        </div>
+        <div class="pipeline-facts">
+          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/binary_NEPC.ipynb">binary_NEPC.ipynb</a></span></div>
+          <div class="fact-row"><b>Collector</b><span><a href="preprocessing/cli/compile_patient_snippets.py">compile_patient_snippets.py</a></span></div>
+          <div class="fact-row"><b>Runner</b><span><a href="tasks/binary_NEPC/run_NEPC_classifier.py">run_NEPC_classifier.py</a></span></div>
+          <div class="fact-row"><b>Call unit</b><span>1 triggered patient</span></div>
+          <div class="fact-row"><b>Resume unit</b><span>Patient</span></div>
+        </div>
+      </div>
+
+      <div class="flow">
+        <div class="flow-step"><span class="step-no">1</span><strong>Prostate cohort + notes</strong><span>MRN list and pathology, imaging, progress notes.</span></div>
+        <div class="flow-step"><span class="step-no">2</span><strong>Triggered snippets</strong><span>NEPC, AVPC, biomarker, and second-primary windows.</span></div>
+        <div class="flow-step"><span class="step-no">3</span><strong>Patient bundle</strong><span>Ranked evidence plus all/no-note cohort bookkeeping.</span></div>
+        <div class="flow-step"><span class="step-no">4</span><strong>Classify + validate</strong><span>One JSON response per triggered patient.</span></div>
+        <div class="flow-step"><span class="step-no">5</span><strong>Labels + failures</strong><span>One cohort row and a retryable failure ledger.</span></div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Inputs and evidence contract</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Input</th><th>Requirement / default</th><th>How it is used</th></tr></thead>
+            <tbody>
+              <tr><td>MRN cohort</td><td><code>--mrns</code> or <code>--mrn-file</code> required for direct parquet runs</td><td>Defines the prostate cohort, including patients with no notes or no trigger signal.</td></tr>
+              <tr><td>Clinical notes</td><td>Default three PROFILE_DATA Parquets or an explicit standardized Parquet bundle</td><td>Scanned for shared <code>nepc</code>, <code>avpc</code>, <code>biomarker</code>, and <code>non_prostate_primary</code> trigger families.</td></tr>
+              <tr><td>Snippet settings</td><td>750 context characters; 300,000 per-note and per-patient character budgets; 75 notes/patient</td><td>Creates tight evidence windows while bounding the single-patient request.</td></tr>
+              <tr><td>Model settings</td><td>Provider, optional model override, workers, retries</td><td>Included in execution behavior; provider/model are included in the resume fingerprint.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Processing steps</h3></div>
+        <div class="steps">
+          <div class="process-step"><div><strong>Prefilter notes in Parquet.</strong><p>The combined trigger pattern is applied to canonical <code>RPT_TEXT</code> during the lazy scan. A separate MRN-only scan records which cohort members have any notes, even if none contain a trigger.</p></div></div>
+          <div class="process-step"><div><strong>Build note candidates in parallel.</strong><p>Each note is cleaned, trigger matches are labeled, nearby windows are merged, and the result records note date, type, trigger categories/count, snippet text, and raw note ID.</p></div></div>
+          <div class="process-step"><div><strong>Rank and bound each patient payload.</strong><p>Candidates sort descending by number of trigger categories, raw trigger count, and recency. The collector keeps at most 75 snippets and stops before the 300,000-character payload budget is exceeded.</p></div></div>
+          <div class="process-step"><div><strong>Write a versioned Parquet bundle.</strong><p><code>LLM_NEPC_classifier_patient_snippets.parquet</code> stores version 3 metadata, one row per ordered snippet, and sentinel rows that preserve no-trigger and no-note cohort members.</p></div></div>
+          <div class="process-step"><div><strong>Separate deterministic and LLM paths.</strong><p>Triggered patients receive one LLM call. Patients with notes but no trigger are written as high-confidence conventional/no-trigger rows. Cohort patients with no notes are written as unclassified <code>no_notes</code> rows.</p></div></div>
+          <div class="process-step"><div><strong>Parse and enforce cross-field invariants.</strong><p>The runner validates JSON types, label precedence, AVPC criteria, C2 pattern, biomarker/molecular flags, second-primary flags, confidence, rationale, and quote/date grounding before writing a success.</p></div></div>
+          <div class="process-step"><div><strong>Resume safely.</strong><p>A run fingerprint binds the snippet SHA-256, provider, model, prompt, safety context, schema version, and output columns. Changed inputs/configuration require <code>--overwrite</code>. <code>--retry-failures</code> targets only the failure ledger.</p></div></div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Classification rules</h3></div>
+        <div class="grid-2">
+          <div class="card card-pad">
+            <h3>Strict primary-label precedence</h3>
+            <ol>
+              <li><code>nepc</code> if NEPC evidence is present</li>
+              <li><code>avpc</code> if any canonical C1–C7 criterion is present and NEPC is absent</li>
+              <li><code>biomarker</code> if a qualifying somatic BRCA1/BRCA2 alteration is present and neither higher label applies</li>
+              <li><code>conventional</code> otherwise</li>
+            </ol>
+          </div>
+          <div class="card card-pad">
+            <h3>Independent annotations</h3>
+            <ul>
+              <li>All documented somatic alterations remain in <code>biomarker_genes</code>.</li>
+              <li>Only BRCA1/BRCA2 set <code>has_biomarker</code>; PALB2 and other genes do not promote the label.</li>
+              <li><code>has_molecular_avpc</code> requires at least two of PTEN, TP53, RB1.</li>
+              <li>Non-prostate primaries are recorded independently from the prostate phenotype.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="callout warn" style="margin-top:0.85rem">
+          <strong>Somatic-only rule.</strong> Germline and ambiguous germline/somatic findings
+          do not qualify for the biomarker label or molecular-AVPC flag.
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Output artifacts</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Artifact</th><th>Role</th><th>Granularity</th></tr></thead>
+            <tbody>
+              <tr><td><code>LLM_NEPC_classifier_patient_snippets.parquet</code></td><td>Versioned evidence bundle and complete cohort bookkeeping</td><td>One ordered snippet or cohort sentinel per row</td></tr>
+              <tr><td><code>LLM_NEPC_classifier_labels.parquet</code></td><td>Primary research output</td><td>One row per cohort patient written</td></tr>
+              <tr><td><code>LLM_NEPC_classifier_failed_patients.parquet</code></td><td>Latest model/validation error for retry</td><td>One current row per failed patient</td></tr>
+              <tr><td><code>LLM_NEPC_classifier_run.parquet</code></td><td>Extraction fingerprint guard</td><td>One run configuration</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Label output schema</h3></div>
+        <div class="schema">
+          <div class="field"><code>DFCI_MRN</code><p>Patient identifier.</p></div>
+          <div class="field"><code>review_status</code><p><code>llm_classified</code>, <code>no_trigger</code>, or <code>no_notes</code>.</p></div>
+          <div class="field"><code>primary_label</code><p><code>nepc</code>, <code>avpc</code>, <code>biomarker</code>, or <code>conventional</code>.</p></div>
+          <div class="field"><code>has_nepc</code><p>Boolean NEPC evidence flag.</p></div>
+          <div class="field"><code>has_avpc</code><p>Boolean canonical clinical AVPC flag.</p></div>
+          <div class="field"><code>has_biomarker</code><p>Boolean qualifying somatic BRCA1/BRCA2 flag.</p></div>
+          <div class="field"><code>has_molecular_avpc</code><p>At least two altered genes among PTEN/TP53/RB1.</p></div>
+          <div class="field"><code>has_non_prostate_primary</code><p>Independent second-primary cancer flag.</p></div>
+          <div class="field"><code>biomarker_genes</code><p>Native Parquet list containing the deduplicated set of all documented somatic alterations/markers.</p></div>
+          <div class="field"><code>avpc_criteria</code><p>Native Parquet list containing the documented subset of C1–C7.</p></div>
+          <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for C2, otherwise <code>none</code>.</p></div>
+          <div class="field"><code>non_prostate_primary_types</code><p>Native Parquet list of cancer types.</p></div>
+          <div class="field"><code>supporting_quotes</code><p>Native Parquet list of grounded verbatim evidence.</p></div>
+          <div class="field"><code>supporting_quote_dates</code><p>Source dates aligned one-to-one with quotes.</p></div>
+          <div class="field"><code>confidence</code><p>High, medium, or low.</p></div>
+          <div class="field"><code>rationale</code><p>Required classification explanation.</p></div>
+          <div class="field"><code>num_snippets</code><p>Evidence snippets presented to the model.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article id="longitudinal-nepc" class="pipeline long-nepc">
+      <div class="pipeline-banner">
+        <div>
+          <span class="pipeline-id">Pipeline 02 · map/reduce timeline</span>
+          <h2>Longitudinal AVPC/NEPC</h2>
+          <p>
+            Builds the earliest supported onset of every canonical Aparicio AVPC criterion
+            and independent NEPC sub-feature. Chunk-level mapping preserves atomic facts;
+            a patient-level synthesis can complete criteria whose components appear in
+            different notes or chunks.
+          </p>
+        </div>
+        <div class="pipeline-facts">
+          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/longitudinal_NEPC.ipynb">longitudinal_NEPC.ipynb</a></span></div>
+          <div class="fact-row"><b>Collector</b><span><a href="preprocessing/cli/collect_nepc_notes.py">collect_nepc_notes.py</a></span></div>
+          <div class="fact-row"><b>Runner</b><span><a href="tasks/longitudinal_NEPC/build_nepc_timeline.py">build_nepc_timeline.py</a></span></div>
+          <div class="fact-row"><b>Call unit</b><span>Chunk map + patient reduce</span></div>
+          <div class="fact-row"><b>Resume unit</b><span>Chunk map and patient synthesis</span></div>
+        </div>
+      </div>
+
+      <div class="flow">
+        <div class="flow-step"><span class="step-no">1</span><strong>Broad evidence scan</strong><span>AVPC/NEPC terms plus component facts.</span></div>
+        <div class="flow-step"><span class="step-no">2</span><strong>Chronological chunks</strong><span>Deduplicated snippets persisted with stable indices.</span></div>
+        <div class="flow-step"><span class="step-no">3</span><strong>Map each chunk</strong><span>Complete criteria + atomic evidence items.</span></div>
+        <div class="flow-step"><span class="step-no">4</span><strong>Synthesize patient</strong><span>Combine all successful maps under canonical rules.</span></div>
+        <div class="flow-step"><span class="step-no">5</span><strong>Onset timeline</strong><span>Earliest criterion dates and cumulative state.</span></div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Inputs and evidence contract</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Input</th><th>Requirement / default</th><th>How it is used</th></tr></thead>
+            <tbody>
+              <tr><td>MRN cohort</td><td>Required for direct parquet runs</td><td>Defines the prostate-cancer population; the evidence table contains patients with at least one matching snippet.</td></tr>
+              <tr><td>Clinical notes</td><td>All three note types by default; optional note-type restriction</td><td>Pathology supports histology/IHC, imaging supports disease distribution, and clinical/lab context supports composite thresholds and dates.</td></tr>
+              <tr><td>Trigger families</td><td>Shared NEPC + AVPC plus <code>avpc_atomic</code></td><td>Adds Gleason, PSA, bone burden/status, LDH/CEA/calcium, ADT agents/start, and CRPC progression terms so component facts are not prefiltered away.</td></tr>
+              <tr><td>Snippet/chunk defaults</td><td>2,000 context characters; 30,000 per snippet; 60,000 per chunk</td><td>Preserves broad context for measurements, conjunctions, exclusivity, and timing; no qualifying snippet is dropped.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Processing steps</h3></div>
+        <div class="steps">
+          <div class="process-step"><div><strong>Collect and deduplicate evidence.</strong><p>Trigger-bearing notes are cleaned and windowed. Identical copy-forward snippet text is deduplicated per patient, with the earliest note date retained as conservative provenance.</p></div></div>
+          <div class="process-step"><div><strong>Assign stable patient chunk indices.</strong><p>Snippets sort by note date and snippet text, then pack greedily under 60,000 characters. The collector writes <code>DFCI_MRN</code>, <code>chunk_index</code>, <code>note_date</code>, <code>note_type</code>, and <code>snippet</code>.</p></div></div>
+          <div class="process-step"><div><strong>Fingerprint the evidence generation.</strong><p>The sidecar records content/config hash, evidence SHA-256, schema version, context/snippet/payload settings, note types, and cohort count. A mismatch requires an intentional overwrite.</p></div></div>
+          <div class="process-step"><div><strong>Map every outstanding chunk.</strong><p>The first prompt returns complete <code>criteria_found</code> plus up to 30 structured <code>evidence_items</code> such as PSA values, lesion counts, metastatic sites, lab values/ULNs, measurements, markers, and therapy/progression dates.</p></div></div>
+          <div class="process-step"><div><strong>Validate map findings individually.</strong><p>Structural response failures reject the call; malformed individual findings are dropped while valid siblings survive. Criterion/fact-type enums, modality, confidence, quote relevance, quote grounding, source date, event date, and C2 exclusivity are checked.</p></div></div>
+          <div class="process-step"><div><strong>Synthesize only complete patient maps.</strong><p>Once every expected chunk has a successful map, a second LLM call combines facts across chunks. It may establish composite criteria but cannot relax thresholds, required conjunctions, timing, high-grade status, or exclusivity.</p></div></div>
+          <div class="process-step"><div><strong>Validate and select one onset per criterion.</strong><p>Synthesis findings receive the same grounding checks. Duplicate criteria retain the earliest supportable event, with date precision used to avoid claiming an imprecise period is certainly earlier than an overlapping precise date.</p></div></div>
+          <div class="process-step"><div><strong>Rebuild auditable products.</strong><p>Validated raw findings, rejected-finding audit, and the cumulative timeline are regenerated from durable map/synthesis logs, keeping derived products consistent with current successful state.</p></div></div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Canonical findings</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Code</th><th>Definition enforced by prompt/validator workflow</th></tr></thead>
+            <tbody>
+              <tr><td>C1</td><td>Histologic small-cell prostate carcinoma, pure or mixed.</td></tr>
+              <tr><td>C2</td><td>Exclusively visceral metastases; concurrent bone or other non-visceral disease defeats the criterion.</td></tr>
+              <tr><td>C3</td><td>Radiographically predominant lytic bone metastases.</td></tr>
+              <tr><td>C4</td><td>Bulky ≥5 cm lymphadenopathy, or a ≥5 cm high-grade (Gleason ≥8) prostate/pelvic mass.</td></tr>
+              <tr><td>C5</td><td>PSA ≤10 ng/mL in a qualifying disease context plus at least 20 bone metastases.</td></tr>
+              <tr><td>C6</td><td>Qualifying neuroendocrine marker plus LDH/CEA ≥2× ULN or malignant hypercalcemia, without another cause.</td></tr>
+              <tr><td>C7</td><td>CRPC/androgen-independent progression within six months of hormonal-therapy initiation.</td></tr>
+              <tr><td>NEPC sub-features</td><td>Small-cell diagnosis, histologic transformation, neuroendocrine features/differentiation, and positive neuroendocrine IHC are tracked independently.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Failure isolation and resume semantics</h3></div>
+        <div class="grid-2">
+          <div class="callout good">
+            <strong>Partial validation success.</strong> A chunk or synthesis can be
+            <code>ok_with_rejections</code>: grounded findings are preserved while invalid
+            objects are quarantined with a reason and original JSON.
+          </div>
+          <div class="callout rose">
+            <strong>Incomplete map.</strong> Synthesis is withheld until every expected
+            chunk has a successful map. Reruns retry only missing/failed chunks, then perform
+            the patient synthesis when the map becomes complete.
+          </div>
+        </div>
+        <p style="margin-top:0.8rem;color:var(--muted);font-size:0.86rem">
+          The extraction fingerprint binds the evidence scan hash, provider, model, both full
+          prompts, and prompt schema version <code>longitudinal-nepc-v4</code>.
+        </p>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Output artifacts</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Artifact</th><th>Core columns / role</th></tr></thead>
+            <tbody>
+              <tr><td><code>avpc_nepc_evidence.parquet</code></td><td><code>DFCI_MRN</code>, <code>chunk_index</code>, <code>note_date</code>, <code>note_type</code>, <code>snippet</code></td></tr>
+              <tr><td><code>avpc_nepc_evidence.meta.parquet</code></td><td>One-row scan configuration, evidence digest/version, resolved sizing, note-type and cohort metadata</td></tr>
+              <tr><td><code>avpc_nepc_processed_chunks.parquet</code></td><td>Chunk counts/status, scan/run fingerprints, and validated map <code>result_json</code></td></tr>
+              <tr><td><code>avpc_nepc_processed_patients.parquet</code></td><td>Patient synthesis status/counts, run fingerprint, and validated synthesis <code>result_json</code></td></tr>
+              <tr><td><code>avpc_nepc_extractions_raw.parquet</code></td><td>Validated pre-timeline criterion findings with source chunk/date, modality, C2 pattern, quote, confidence</td></tr>
+              <tr><td><code>avpc_nepc_rejected_findings.parquet</code></td><td>MRN, map/synthesis stage, chunk index, rejection reason, original item JSON, run fingerprint</td></tr>
+              <tr><td><code>avpc_nepc_timeline.parquet</code></td><td>Final cumulative criterion-onset timeline</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Timeline output schema</h3></div>
+        <div class="schema">
+          <div class="field"><code>DFCI_MRN</code><p>Patient identifier.</p></div>
+          <div class="field"><code>event_date</code><p>Resolved criterion onset date.</p></div>
+          <div class="field"><code>date_source</code><p><code>stated</code>, <code>note_date</code>, or <code>unknown</code>.</p></div>
+          <div class="field"><code>date_precision</code><p>Day, month, year, or unknown.</p></div>
+          <div class="field"><code>criterion_added</code><p>C1–C7 or an NEPC sub-feature code.</p></div>
+          <div class="field"><code>criterion_label</code><p>Human-readable canonical definition.</p></div>
+          <div class="field"><code>modality</code><p>Pathology, imaging, clinical, or labs.</p></div>
+          <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for valid C2.</p></div>
+          <div class="field"><code>cumulative_criteria</code><p>Native Parquet list of criteria established by that date.</p></div>
+          <div class="field"><code>num_criteria_to_date</code><p>Cumulative criterion count.</p></div>
+          <div class="field"><code>supporting_quote</code><p>Grounded verbatim onset evidence.</p></div>
+          <div class="field"><code>confidence</code><p>High, medium, or low.</p></div>
+          <div class="field"><code>source_note_date</code><p>Date of the supporting snippet.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article id="cancer-stage" class="pipeline stage">
+      <div class="pipeline-banner">
+        <div>
+          <span class="pipeline-id">Pipeline 03 · pan-cancer timeline</span>
+          <h2>Cancer stage extraction</h2>
+          <p>
+            Extracts every explicitly documented staging event across cancer types and
+            staging systems, resolves stated or source-note dates, and collapses repeated
+            statements into a stage-change timeline per patient, cancer, and system.
+          </p>
+        </div>
+        <div class="pipeline-facts">
+          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/cancer_stage.ipynb">cancer_stage.ipynb</a></span></div>
+          <div class="fact-row"><b>Collector</b><span><a href="preprocessing/cli/extract_stage_notes.py">extract_stage_notes.py</a></span></div>
+          <div class="fact-row"><b>Runner</b><span><a href="tasks/cancer_stage/run_stage_extraction.py">run_stage_extraction.py</a></span></div>
+          <div class="fact-row"><b>Call unit</b><span>Patient evidence chunk</span></div>
+          <div class="fact-row"><b>Resume unit</b><span>Patient</span></div>
+        </div>
+      </div>
+
+      <div class="flow">
+        <div class="flow-step"><span class="step-no">1</span><strong>Pan-cancer notes</strong><span>Full PROFILE_DATA note population by default.</span></div>
+        <div class="flow-step"><span class="step-no">2</span><strong>Stage snippets</strong><span>Named systems, groups, TNM, limited/extensive.</span></div>
+        <div class="flow-step"><span class="step-no">3</span><strong>Runtime chunks</strong><span>Chronological, payload-bounded patient evidence.</span></div>
+        <div class="flow-step"><span class="step-no">4</span><strong>Extract events</strong><span>All explicit stage statements with cancer type.</span></div>
+        <div class="flow-step"><span class="step-no">5</span><strong>Stage changes</strong><span>Deduplicate and suppress unchanged repeats.</span></div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Inputs and trigger coverage</h3></div>
+        <div class="grid-2">
+          <div class="card card-pad">
+            <h3>Input scope</h3>
+            <ul>
+              <li>All PROFILE_DATA MRNs by default; no prostate cohort requirement.</li>
+              <li>Optional MRN file/list and note-type restrictions.</li>
+              <li>Default collector context: 600 characters per side; notebook currently configures 6,000.</li>
+              <li>Per-snippet cap: 30,000 characters; extraction chunk budget: 60,000.</li>
+            </ul>
+          </div>
+          <div class="card card-pad">
+            <h3>Trigger families</h3>
+            <div class="pill-list">
+              <span class="pill">Stage I–IV / 1–4</span>
+              <span class="pill">TNM</span>
+              <span class="pill">FIGO</span>
+              <span class="pill">Ann Arbor</span>
+              <span class="pill">Rai</span>
+              <span class="pill">Binet</span>
+              <span class="pill">Durie–Salmon</span>
+              <span class="pill">Limited/extensive SCLC</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Processing steps</h3></div>
+        <div class="steps">
+          <div class="process-step"><div><strong>Collect stage-bearing snippets.</strong><p>The pan-cancer collector applies stage trigger regexes during the parquet scan, cleans/window notes, and deduplicates identical patient snippets while retaining the earliest note date.</p></div></div>
+          <div class="process-step"><div><strong>Write evidence and scan metadata.</strong><p><code>stage_evidence.parquet</code> stores note UID, MRN, note date/type, native-list trigger categories, and snippet. The Parquet sidecar binds scan configuration and the evidence SHA-256.</p></div></div>
+          <div class="process-step"><div><strong>Group evidence at extraction time.</strong><p>The runner orders evidence chronologically and greedily packs every snippet into one or more patient chunks under <code>payload_max_chars</code>; no evidence row is dropped.</p></div></div>
+          <div class="process-step"><div><strong>Extract every explicit staging event.</strong><p>Each finding includes cancer type, stated system and raw value, normalized base group when directly recoverable, stated stage date, source-note date, historical-reference flag, quote, confidence, and rationale.</p></div></div>
+          <div class="process-step"><div><strong>Reject invalid patient results.</strong><p>Each event must have a cancer type and stage value, valid group normalization, grounded quote/source date, parseable non-future stage date, boolean historical flag, valid confidence, and rationale. Any failed chunk means the patient is not marked complete.</p></div></div>
+          <div class="process-step"><div><strong>Build the stage-change timeline.</strong><p>Dates resolve from the stated stage date or fall back to source-note date with tracked precision. Exact duplicate events collapse, then consecutive repeated stage state is suppressed within patient + cancer type + staging system.</p></div></div>
+          <div class="process-step"><div><strong>Guard resumability.</strong><p>The run fingerprint includes evidence SHA-256, provider, model, full prompt and safety context, schema version, output schemas, and payload size. Only patients logged <code>ok</code> are skipped on rerun.</p></div></div>
+        </div>
+      </div>
+
+      <div class="callout warn subsection">
+        <strong>No inferred stage.</strong> The model is instructed not to derive stage from
+        “metastatic,” “localized,” treatment, response, or trajectory. TNM and non-AJCC
+        systems are preserved as written unless the note explicitly supplies a group mapping.
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Output artifacts</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Artifact</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td><code>stage_evidence.parquet</code></td><td>Deduplicated trigger evidence: note UID, MRN, date/type, native-list trigger categories, snippet</td></tr>
+              <tr><td><code>stage_evidence.meta.parquet</code></td><td>One-row evidence scan hash, SHA-256, context and note-type metadata</td></tr>
+              <tr><td><code>stage_extractions_raw.parquet</code></td><td>Validated pre-dedup LLM findings, including rationale</td></tr>
+              <tr><td><code>stage_processed_patients.parquet</code></td><td>Patient chunk/finding counts and <code>ok</code> or error status</td></tr>
+              <tr><td><code>stage_timeline.parquet</code></td><td>Final deduplicated stage-change timeline</td></tr>
+              <tr><td><code>stage_run.parquet</code></td><td>One-row extraction fingerprint guard</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Timeline output schema</h3></div>
+        <div class="schema">
+          <div class="field"><code>DFCI_MRN</code><p>Patient identifier.</p></div>
+          <div class="field"><code>cancer_type</code><p>Required cancer being staged.</p></div>
+          <div class="field"><code>staging_system</code><p>Stated system or null.</p></div>
+          <div class="field"><code>stage_raw</code><p>Original staging expression.</p></div>
+          <div class="field"><code>stage_group</code><p>Directly recoverable normalized I–IV group.</p></div>
+          <div class="field"><code>stage_date</code><p>Resolved event date.</p></div>
+          <div class="field"><code>date_source</code><p>Stated date, note-date fallback, or unknown.</p></div>
+          <div class="field"><code>date_precision</code><p>Day, month, year, or unknown.</p></div>
+          <div class="field"><code>is_historical_reference</code><p>Whether the note recounts an earlier staging event.</p></div>
+          <div class="field"><code>supporting_quote</code><p>Grounded verbatim evidence.</p></div>
+          <div class="field"><code>confidence</code><p>High, medium, or low.</p></div>
+          <div class="field"><code>source_note_date</code><p>Date of the supporting snippet.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <article id="gleason" class="pipeline gleason">
+      <div class="pipeline-banner">
+        <div>
+          <span class="pipeline-id">Pipeline 04 · prostate grade timeline</span>
+          <h2>Gleason score and Grade Group</h2>
+          <p>
+            Extracts all distinct prostate grading events—including Grade Group-only
+            findings—validates arithmetic and clinical ranges, and produces a dated,
+            specimen-aware timeline with chunk-level recovery from model failures.
+          </p>
+        </div>
+        <div class="pipeline-facts">
+          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/gleason_score.ipynb">gleason_score.ipynb</a></span></div>
+          <div class="fact-row"><b>Collector</b><span><a href="preprocessing/cli/collect_gleason_notes.py">collect_gleason_notes.py</a></span></div>
+          <div class="fact-row"><b>Runner</b><span><a href="tasks/gleason_score/build_gleason_timeline.py">build_gleason_timeline.py</a></span></div>
+          <div class="fact-row"><b>Call unit</b><span>Persisted evidence chunk</span></div>
+          <div class="fact-row"><b>Resume unit</b><span>Chunk</span></div>
+        </div>
+      </div>
+
+      <div class="flow">
+        <div class="flow-step"><span class="step-no">1</span><strong>Prostate notes</strong><span>MRN cohort and configurable note types.</span></div>
+        <div class="flow-step"><span class="step-no">2</span><strong>Grade mentions</strong><span>Gleason, Grade Group, and ISUP windows.</span></div>
+        <div class="flow-step"><span class="step-no">3</span><strong>Stable chunks</strong><span>Deduplicated evidence with persisted indices.</span></div>
+        <div class="flow-step"><span class="step-no">4</span><strong>Extract + validate</strong><span>Scores, specimen, dates, historical status, quote.</span></div>
+        <div class="flow-step"><span class="step-no">5</span><strong>Grade timeline</strong><span>Resolved dates, derived groups, distinct events.</span></div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Inputs and evidence contract</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Input</th><th>Requirement / default</th><th>How it is used</th></tr></thead>
+            <tbody>
+              <tr><td>MRN cohort</td><td>Required for direct parquet runs</td><td>Defines the prostate cohort.</td></tr>
+              <tr><td>Clinical notes</td><td>All three note types by default; Pathology-only is supported and recommended for cheaper authoritative extraction</td><td>Scanned for <code>gleason</code>, <code>grade group</code>, or <code>ISUP grade</code>.</td></tr>
+              <tr><td>Snippet/chunk defaults</td><td>600 context characters; 30,000 per snippet; 60,000 per chunk</td><td>Identical copy-forward windows are deduplicated, ordered, and packed without dropping qualifying snippets.</td></tr>
+              <tr><td>Evidence version</td><td><code>gleason-evidence-v2</code></td><td>Prevents unsafe reuse of evidence generated before the current cohort and chunk-assignment contract.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Processing steps</h3></div>
+        <div class="steps">
+          <div class="process-step"><div><strong>Collect and chunk all grading evidence.</strong><p>Notes are lazily prefiltered, cleaned, windowed, deduplicated per patient by snippet text, sorted deterministically, and assigned stable <code>chunk_index</code> values.</p></div></div>
+          <div class="process-step"><div><strong>Verify evidence before extraction.</strong><p>The runner requires a valid metadata sidecar, current evidence schema version, matching evidence SHA-256, and scan configuration consistent with any existing chunk log.</p></div></div>
+          <div class="process-step"><div><strong>Extract each outstanding chunk.</strong><p>The LLM returns primary/secondary patterns, total, explicit Grade Group, specimen type, stated scoring date, source-note date, historical-reference flag, and verbatim quote for every distinct grading event.</p></div></div>
+          <div class="process-step"><div><strong>Validate exact integers and clinical consistency.</strong><p>Primary/secondary must be integers 1–5 and appear as a pair; total must be 2–10 and equal their sum; Grade Group must be 1–5 and agree with derivation when patterns are available. A Grade Group alone remains a valid event.</p></div></div>
+          <div class="process-step"><div><strong>Validate provenance and date direction.</strong><p>Specimen type must be biopsy, prostatectomy, TURP, metastasis, or unknown. Quote/source date must ground in the current chunk, and a stated scoring date cannot follow its source note.</p></div></div>
+          <div class="process-step"><div><strong>Persist successes independently.</strong><p>Successful chunk findings are retained even if another chunk fails. The chunk log is the resume source; reruns call only outstanding chunks and preserve successful siblings.</p></div></div>
+          <div class="process-step"><div><strong>Compact retry state and build timeline.</strong><p>Append-only patient/chunk logs compact to their latest state, superseded raw retry occurrences are removed, and the timeline resolves dates, recomputes totals, derives missing Grade Groups, and deduplicates by score/group/date/specimen.</p></div></div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Grade Group derivation</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Gleason pattern</th><th>Derived Grade Group</th></tr></thead>
+            <tbody>
+              <tr><td>Total ≤6</td><td>1</td></tr>
+              <tr><td>3 + 4</td><td>2</td></tr>
+              <tr><td>4 + 3</td><td>3</td></tr>
+              <tr><td>Total 8</td><td>4</td></tr>
+              <tr><td>Total 9–10</td><td>5</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Output artifacts</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Artifact</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td><code>gleason_evidence.parquet</code></td><td>MRN/chunk-indexed note evidence</td></tr>
+              <tr><td><code>gleason_evidence.meta.parquet</code></td><td>One-row scan configuration, evidence digest/version, resolved collection settings, cohort count</td></tr>
+              <tr><td><code>gleason_extractions_raw.parquet</code></td><td>Validated pre-dedup findings with source chunk and quote</td></tr>
+              <tr><td><code>gleason_processed_chunks.parquet</code></td><td>Chunk-level status and scan/run fingerprints</td></tr>
+              <tr><td><code>gleason_processed_patients.parquet</code></td><td>Total/complete chunks, findings, status, and run fingerprint</td></tr>
+              <tr><td><code>gleason_timeline.parquet</code></td><td>Final dated score/Grade Group events</td></tr>
+              <tr><td><code>gleason_run.parquet</code></td><td>One-row extraction fingerprint guard</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Timeline output schema</h3></div>
+        <div class="schema">
+          <div class="field"><code>DFCI_MRN</code><p>Patient identifier.</p></div>
+          <div class="field"><code>gleason_date</code><p>Resolved scoring date.</p></div>
+          <div class="field"><code>date_source</code><p>Stated date, note-date fallback, or unknown.</p></div>
+          <div class="field"><code>date_precision</code><p>Day, month, year, or unknown.</p></div>
+          <div class="field"><code>gleason_primary</code><p>Nullable integer primary pattern.</p></div>
+          <div class="field"><code>gleason_secondary</code><p>Nullable integer secondary pattern.</p></div>
+          <div class="field"><code>gleason_total</code><p>Validated/recomputed total.</p></div>
+          <div class="field"><code>grade_group</code><p>Explicit or derived Grade Group 1–5.</p></div>
+          <div class="field"><code>specimen_type</code><p>Biopsy, prostatectomy, TURP, metastasis, or unknown.</p></div>
+          <div class="field"><code>is_historical_reference</code><p>Whether the note cites a prior/outside grading event.</p></div>
+          <div class="field"><code>supporting_quote</code><p>Grounded verbatim evidence.</p></div>
+          <div class="field"><code>source_note_date</code><p>Date of the supporting snippet.</p></div>
+        </div>
+      </div>
+    </article>
+
+    <section id="operations" class="section-block">
+      <div class="section-head">
+        <div>
+          <div class="kicker">Execution guide</div>
+          <h2>Operational comparison</h2>
+        </div>
+        <p>
+          The notebooks expose the same two steps as the command line: explicitly build
+          evidence, then run provider-backed extraction. Reusing verified evidence avoids
+          repeated raw-note scans.
+        </p>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Default sizing and recovery</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Pipeline</th><th>Context / snippet / payload</th><th>Evidence dedup</th><th>Failure recovery</th></tr></thead>
+            <tbody>
+              <tr><td>Binary NEPC</td><td>750 / 300k / 300k chars; max 75 notes</td><td>Ranked candidates; no longitudinal copy-forward collapse</td><td>Patient failure Parquet; explicit <code>--retry-failures</code></td></tr>
+              <tr><td>Longitudinal AVPC/NEPC</td><td>2,000 / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Retry failed chunks; synthesize after complete map</td></tr>
+              <tr><td>Cancer stage</td><td>Collector CLI 600 (notebook 6,000) / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Patient rerun unless processed status is <code>ok</code></td></tr>
+              <tr><td>Gleason</td><td>600 / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Retry only failed/missing chunks</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Minimal command sequences</h3></div>
+        <details open>
+          <summary>Binary NEPC</summary>
+          <div class="details-body">
+<pre><code>python preprocessing/cli/compile_patient_snippets.py \
+  --mrn-file /path/to/prostate_mrns.parquet \
+  --output-path /path/to/LLM_NEPC_classifier_patient_snippets.parquet
+
+python tasks/binary_NEPC/run_NEPC_classifier.py \
+  --snippets-path /path/to/LLM_NEPC_classifier_patient_snippets.parquet \
+  --output-dir /path/to/LLM_NEPC_labels \
+  --provider vertex_ai</code></pre>
+          </div>
+        </details>
+        <details>
+          <summary>Longitudinal AVPC/NEPC</summary>
+          <div class="details-body">
+<pre><code>python preprocessing/cli/collect_nepc_notes.py \
+  --mrn-file /path/to/prostate_mrns.parquet \
+  --output-dir /path/to/LLM_avpc_nepc_timeline
+
+python tasks/longitudinal_NEPC/build_nepc_timeline.py \
+  --output-dir /path/to/LLM_avpc_nepc_timeline \
+  --provider vertex_ai</code></pre>
+          </div>
+        </details>
+        <details>
+          <summary>Cancer stage</summary>
+          <div class="details-body">
+<pre><code>python preprocessing/cli/extract_stage_notes.py \
+  --output-dir /path/to/LLM_stage_extraction
+
+python tasks/cancer_stage/run_stage_extraction.py \
+  --output-dir /path/to/LLM_stage_extraction \
+  --provider vertex_ai</code></pre>
+          </div>
+        </details>
+        <details>
+          <summary>Gleason</summary>
+          <div class="details-body">
+<pre><code>python preprocessing/cli/collect_gleason_notes.py \
+  --mrn-file /path/to/prostate_mrns.parquet \
+  --output-dir /path/to/LLM_gleason_timeline
+
+python tasks/gleason_score/build_gleason_timeline.py \
+  --output-dir /path/to/LLM_gleason_timeline \
+  --provider vertex_ai</code></pre>
+          </div>
+        </details>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Date handling shared by timelines</h3></div>
+        <div class="grid-2">
+          <div class="card card-pad">
+            <h3>Resolution order</h3>
+            <ol>
+              <li>Use a valid date stated in the clinical text.</li>
+              <li>Otherwise use structured source-note <code>EVENT_DATE</code>.</li>
+              <li>Otherwise retain an unknown date/source/precision.</li>
+            </ol>
+          </div>
+          <div class="card card-pad">
+            <h3>Partial dates</h3>
+            <p>Two fixed parser anchors reveal which date components the text actually supplied. Year-only becomes January 1 with <code>year</code> precision; month/year becomes the first day with <code>month</code> precision. Results never depend on the day the pipeline runs.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <div class="subsection-title"><h3>Provider and environment configuration</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Setting</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>PROFILE_DATA_PATH</code></td><td>Overrides the default PROFILE_DATA root.</td></tr>
+              <tr><td><code>LLM_ANNOTATIONS_DATA_PATH</code></td><td>Overrides the shared derived-data/output root.</td></tr>
+              <tr><td><code>CAIA_AZURE_OPENAI_ENDPOINT</code>, <code>CAIA_AZURE_OPENAI_API_VERSION</code>, <code>CAIA_AZURE_OPENAI_MODEL</code></td><td>DFCI Azure OpenAI endpoint, API version, and default deployment.</td></tr>
+              <tr><td><code>VERTEX_PROJECT</code>, <code>VERTEX_LOCATION</code>, <code>VERTEX_MODEL</code></td><td>Google Vertex AI project, region, and default model.</td></tr>
+              <tr><td>Authentication</td><td>Azure uses <code>DefaultAzureCredential</code>; Vertex uses Google Application Default Credentials.</td></tr>
+              <tr><td>Notebook model override</td><td>Current notebooks explicitly choose <code>gpt-4o</code> or <code>gemini-2.5-flash-lite</code>; CLI adapters otherwise supply their configured defaults.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="code-map" class="section-block">
+      <div class="section-head">
+        <div>
+          <div class="kicker">Traceability</div>
+          <h2>Code map</h2>
+        </div>
+        <p>Primary implementation files used to derive this report.</p>
+      </div>
+      <div class="table-wrap filemap">
+        <table>
+          <thead><tr><th>File</th><th>Responsibility</th></tr></thead>
+          <tbody>
+            <tr><td><a href="preprocessing/config.py"><code>preprocessing/config.py</code></a></td><td>Default paths, standardized note columns, safety context, sizing profiles, evidence versions.</td></tr>
+            <tr><td><a href="preprocessing/notes.py"><code>preprocessing/notes.py</code></a></td><td>MRN parsing, native PROFILE and standardized bundle Parquet loading, text/date/type mapping, source precedence.</td></tr>
+            <tr><td><a href="preprocessing/triggers.py"><code>preprocessing/triggers.py</code></a></td><td>Shared binary/NEPC/AVPC/biomarker/second-primary triggers and window construction.</td></tr>
+            <tr><td><a href="preprocessing/snippets.py"><code>preprocessing/snippets.py</code></a></td><td>Parallel note scanning and binary patient-level ranking/budgeting.</td></tr>
+            <tr><td><a href="preprocessing/longitudinal.py"><code>preprocessing/longitudinal.py</code></a></td><td>Copy-forward deduplication, stable chunk packing, scan fingerprints, date resolution, Grade Group derivation.</td></tr>
+            <tr><td><a href="preprocessing/grounding.py"><code>preprocessing/grounding.py</code></a></td><td>Quote normalization and source-note/date grounding.</td></tr>
+            <tr><td><a href="providers/"><code>providers/</code></a></td><td>Provider registry, retry adapters, and shared JSON response parsing.</td></tr>
+            <tr><td><a href="tasks/binary_NEPC/"><code>tasks/binary_NEPC/</code></a></td><td>Classifier prompt, validation, cohort status logic, outputs, failure retry, run fingerprint.</td></tr>
+            <tr><td><a href="tasks/longitudinal_NEPC/"><code>tasks/longitudinal_NEPC/</code></a></td><td>Canonical criteria, map/reduce prompts, per-item validation, quarantine, and cumulative timeline.</td></tr>
+            <tr><td><a href="tasks/cancer_stage/"><code>tasks/cancer_stage/</code></a></td><td>Stage extraction prompt, schema/grounding validation, raw events and stage-change timeline.</td></tr>
+            <tr><td><a href="tasks/gleason_score/"><code>tasks/gleason_score/</code></a></td><td>Gleason extraction prompt, numeric/date validation, chunk resume, Grade Group timeline.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout" style="margin-top:1rem">
+        <strong>Interpretation boundary.</strong> Evidence and raw-extraction Parquets are
+        audit artifacts. The <code>*_timeline.parquet</code> and binary labels Parquet are the normalized
+        downstream products; processed/rejected/failure files should remain alongside them to
+        preserve completion and quality context.
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Self-contained technical overview generated from the repository’s current Python and notebook implementations.
+  </footer>
+</body>
+</html>

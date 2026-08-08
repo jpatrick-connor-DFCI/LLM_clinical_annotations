@@ -12,7 +12,12 @@ from preprocessing.bundles.snippet_bundle import (  # noqa: E402
     SNIPPET_BUNDLE_FILENAME,
     write_snippet_bundle,
 )
-from preprocessing.config import DEFAULT_OUTPUT_DIR, DEFAULT_PROFILE_NOTE_PATHS, SNIPPET_PROFILES  # noqa: E402
+from preprocessing.config import (  # noqa: E402
+    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_PROFILE_NOTE_PATHS,
+    SNIPPET_PROFILES,
+)
 from preprocessing.notes import (  # noqa: E402
     load_notes,
     load_profile_note_mrns,
@@ -32,7 +37,13 @@ def parse_args():
             "save the standalone artifact required by tasks/binary_NEPC/run_NEPC_classifier.py."
         )
     )
-    parser.add_argument("--mrn-file", type=Path, default=None)
+    parser.add_argument(
+        "--mrn-file",
+        type=Path,
+        default=DEFAULT_ICD_PROSTATE_MRN_CSV,
+        help="CSV cohort file containing DFCI_MRN values; defaults to the "
+             "COMPASS_PROFILE_DATA ICD prostate cohort.",
+    )
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,
                         help="PROFILE_DATA clinical-note parquet. Repeat for multiple files; "

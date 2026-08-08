@@ -511,14 +511,14 @@
           <tbody>
             <tr>
               <td><a href="#binary-nepc">Binary NEPC</a></td>
-              <td>Prostate-specific; MRN cohort required for direct parquet scans</td>
+              <td>Prostate-specific; defaults to the COMPASS_PROFILE_DATA ICD cohort</td>
               <td>Combined NEPC, AVPC, biomarker, and second-primary triggers; ranked/capped snippets</td>
               <td>One call per triggered patient</td>
               <td>One classification row per cohort patient</td>
             </tr>
             <tr>
               <td><a href="#longitudinal-nepc">Longitudinal AVPC/NEPC</a></td>
-              <td>Prostate-specific; MRN cohort required for direct parquet scans</td>
+              <td>Prostate-specific; defaults to the COMPASS_PROFILE_DATA ICD cohort</td>
               <td>NEPC/AVPC triggers plus atomic facts needed for composite Aparicio criteria</td>
               <td>Map call per chunk + synthesis call per patient</td>
               <td>Cumulative criterion-onset timeline</td>
@@ -532,7 +532,7 @@
             </tr>
             <tr>
               <td><a href="#gleason">Gleason</a></td>
-              <td>Prostate-specific; MRN cohort required for direct parquet scans</td>
+              <td>Prostate-specific; defaults to the COMPASS_PROFILE_DATA ICD cohort</td>
               <td>Gleason, Grade Group, and ISUP mentions</td>
               <td>One call per persisted evidence chunk</td>
               <td>Score/grade-group timeline</td>
@@ -633,7 +633,10 @@
         metadata, progress, failure, rejection, raw-result, label, and timeline artifact is
         written atomically as Zstandard-compressed Parquet. List-valued fields remain native
         Parquet lists. JSON is used only for provider messages or retained inside an explicit
-        audit-value column, never as the file transport.
+        audit-value column, never as the file transport. The prostate pipelines read their
+        default <code>DFCI_MRN</code> cohort from
+        <code>$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv</code>;
+        externally supplied cohort overrides are also CSV.
       </div>
 
       <div class="subsection">
@@ -710,7 +713,7 @@
           <table>
             <thead><tr><th>Input</th><th>Requirement / default</th><th>How it is used</th></tr></thead>
             <tbody>
-              <tr><td>MRN cohort</td><td><code>--mrns</code> or <code>--mrn-file</code> required for direct parquet runs</td><td>Defines the prostate cohort, including patients with no notes or no trigger signal.</td></tr>
+              <tr><td>MRN cohort</td><td>Defaults to <code>$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv</code>; <code>--mrns</code> or <code>--mrn-file</code> overrides it</td><td>Defines the prostate cohort, including patients with no notes or no trigger signal.</td></tr>
               <tr><td>Clinical notes</td><td>Default three PROFILE_DATA Parquets or an explicit standardized Parquet bundle</td><td>Scanned for shared <code>nepc</code>, <code>avpc</code>, <code>biomarker</code>, and <code>non_prostate_primary</code> trigger families.</td></tr>
               <tr><td>Snippet settings</td><td>750 context characters; 300,000 per-note and per-patient character budgets; 75 notes/patient</td><td>Creates tight evidence windows while bounding the single-patient request.</td></tr>
               <tr><td>Model settings</td><td>Provider, optional model override, workers, retries</td><td>Included in execution behavior; provider/model are included in the resume fingerprint.</td></tr>
@@ -834,7 +837,7 @@
           <table>
             <thead><tr><th>Input</th><th>Requirement / default</th><th>How it is used</th></tr></thead>
             <tbody>
-              <tr><td>MRN cohort</td><td>Required for direct parquet runs</td><td>Defines the prostate-cancer population; the evidence table contains patients with at least one matching snippet.</td></tr>
+              <tr><td>MRN cohort</td><td>Defaults to the COMPASS_PROFILE_DATA ICD prostate CSV; optional CSV override</td><td>Defines the prostate-cancer population; the evidence table contains patients with at least one matching snippet.</td></tr>
               <tr><td>Clinical notes</td><td>All three note types by default; optional note-type restriction</td><td>Pathology supports histology/IHC, imaging supports disease distribution, and clinical/lab context supports composite thresholds and dates.</td></tr>
               <tr><td>Trigger families</td><td>Shared NEPC + AVPC plus <code>avpc_atomic</code></td><td>Adds Gleason, PSA, bone burden/status, LDH/CEA/calcium, ADT agents/start, and CRPC progression terms so component facts are not prefiltered away.</td></tr>
               <tr><td>Snippet/chunk defaults</td><td>2,000 context characters; 30,000 per snippet; 60,000 per chunk</td><td>Preserves broad context for measurements, conjunctions, exclusivity, and timing; no qualifying snippet is dropped.</td></tr>
@@ -969,7 +972,7 @@
             <h3>Input scope</h3>
             <ul>
               <li>All PROFILE_DATA MRNs by default; no prostate cohort requirement.</li>
-              <li>Optional MRN file/list and note-type restrictions.</li>
+              <li>Optional CSV MRN file/list and note-type restrictions.</li>
               <li>Default collector context: 600 characters per side; notebook currently configures 6,000.</li>
               <li>Per-snippet cap: 30,000 characters; extraction chunk budget: 60,000.</li>
             </ul>
@@ -1082,7 +1085,7 @@
           <table>
             <thead><tr><th>Input</th><th>Requirement / default</th><th>How it is used</th></tr></thead>
             <tbody>
-              <tr><td>MRN cohort</td><td>Required for direct parquet runs</td><td>Defines the prostate cohort.</td></tr>
+              <tr><td>MRN cohort</td><td>Defaults to the COMPASS_PROFILE_DATA ICD prostate CSV; optional CSV override</td><td>Defines the prostate cohort.</td></tr>
               <tr><td>Clinical notes</td><td>All three note types by default; Pathology-only is supported and recommended for cheaper authoritative extraction</td><td>Scanned for <code>gleason</code>, <code>grade group</code>, or <code>ISUP grade</code>.</td></tr>
               <tr><td>Snippet/chunk defaults</td><td>600 context characters; 30,000 per snippet; 60,000 per chunk</td><td>Identical copy-forward windows are deduplicated, ordered, and packed without dropping qualifying snippets.</td></tr>
               <tr><td>Evidence version</td><td><code>gleason-evidence-v2</code></td><td>Prevents unsafe reuse of evidence generated before the current cohort and chunk-assignment contract.</td></tr>
@@ -1191,7 +1194,6 @@
           <summary>Binary NEPC</summary>
           <div class="details-body">
 <pre><code>python preprocessing/cli/compile_patient_snippets.py \
-  --mrn-file /path/to/prostate_mrns.parquet \
   --output-path /path/to/LLM_NEPC_classifier_patient_snippets.parquet
 
 python tasks/binary_NEPC/run_NEPC_classifier.py \
@@ -1204,7 +1206,6 @@ python tasks/binary_NEPC/run_NEPC_classifier.py \
           <summary>Longitudinal AVPC/NEPC</summary>
           <div class="details-body">
 <pre><code>python preprocessing/cli/collect_nepc_notes.py \
-  --mrn-file /path/to/prostate_mrns.parquet \
   --output-dir /path/to/LLM_avpc_nepc_timeline
 
 python tasks/longitudinal_NEPC/build_nepc_timeline.py \
@@ -1227,7 +1228,6 @@ python tasks/cancer_stage/run_stage_extraction.py \
           <summary>Gleason</summary>
           <div class="details-body">
 <pre><code>python preprocessing/cli/collect_gleason_notes.py \
-  --mrn-file /path/to/prostate_mrns.parquet \
   --output-dir /path/to/LLM_gleason_timeline
 
 python tasks/gleason_score/build_gleason_timeline.py \

@@ -24,6 +24,15 @@ DEFAULT_OUTPUT_DIR = Path(
 PROFILE_DATA_PATH = Path(
     os.environ.get("PROFILE_DATA_PATH", "/data/gusev/USERS/jpconnor/data/PROFILE_DATA/")
 )
+COMPASS_PROFILE_DATA_PATH = Path(
+    os.environ.get(
+        "COMPASS_PROFILE_DATA_PATH",
+        "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/",
+    )
+)
+DEFAULT_ICD_PROSTATE_MRN_CSV = (
+    COMPASS_PROFILE_DATA_PATH / "mrn_lists" / "icd_prostate_mrn_flags.csv"
+)
 PROFILE_NOTES_PATH = PROFILE_DATA_PATH / "CLINICAL_NOTES"
 DEFAULT_PROFILE_NOTE_PATHS = tuple(
     PROFILE_NOTES_PATH / filename

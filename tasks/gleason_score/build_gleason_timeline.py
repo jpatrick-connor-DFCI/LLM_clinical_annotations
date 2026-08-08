@@ -135,7 +135,8 @@ def parse_args():
                         help="Directory containing gleason_evidence.parquet and where outputs are written.")
     parser.add_argument("--evidence-path", type=Path, default=None,
                         help="Override path to gleason_evidence.parquet.")
-    parser.add_argument("--mrn-file", type=Path, default=None)
+    parser.add_argument("--mrn-file", type=Path, default=None,
+                        help="CSV cohort file containing DFCI_MRN values.")
     parser.add_argument("--mrns", default=None)
     parser.add_argument(
         "--provider",

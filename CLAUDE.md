@@ -10,26 +10,26 @@ from the repo root.
 pip install -e ".[dfci_gpt]"     # or ".[vertex_ai]"
 
 # Build the shared note source (required before most pipelines)
-python preprocessing/cli/compile_patient_snippets.py --mrn-file /path/to/prostate_mrns.parquet
+python preprocessing/cli/compile_patient_snippets.py
 
 # Binary NEPC: compile snippets, then classify
-python preprocessing/cli/compile_patient_snippets.py --mrn-file /path/to/prostate_mrns.parquet --output-path /path/to/patient_snippets.parquet
+python preprocessing/cli/compile_patient_snippets.py --output-path /path/to/patient_snippets.parquet
 python tasks/binary_NEPC/run_NEPC_classifier.py --snippets-path /path/to/patient_snippets.parquet --output-dir /path/to/out --provider dfci_gpt
 
 # Cancer stage / Gleason / longitudinal NEPC: collect evidence, then extract
 python preprocessing/cli/extract_stage_notes.py --output-dir /path/to/out          # stage: scan (no LLM)
 python tasks/cancer_stage/run_stage_extraction.py --output-dir /path/to/out --provider vertex_ai
 
-python preprocessing/cli/collect_gleason_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out
+python preprocessing/cli/collect_gleason_notes.py --output-dir /path/to/out
 python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
-python preprocessing/cli/collect_nepc_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out
+python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
 python tasks/longitudinal_NEPC/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
-python preprocessing/cli/collect_nepc_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out --scan-workers 16
-python preprocessing/cli/collect_nepc_notes.py --mrn-file /path/to/prostate_mrns.parquet --output-dir /path/to/out --context-chars 4000 --overwrite
+python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
+python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --context-chars 4000 --overwrite
 
 # Pilot / subset run (most task runners support these)
 python tasks/cancer_stage/run_stage_extraction.py --mrns "12345,67890" --provider dfci_gpt
@@ -126,6 +126,10 @@ All repository-owned persisted I/O uses Zstandard-compressed Parquet, including
 evidence, snippet bundles, run/scan metadata, processed ledgers, rejected or
 failed rows, raw findings, and final timelines/labels. JSON is restricted to
 provider request/response payloads and serialized audit values inside Parquet.
+Externally supplied MRN cohort lists are CSV inputs and are not pipeline artifacts.
+The prostate-specific collectors default to
+`$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; cancer stage
+remains pan-cancer unless an MRN restriction is supplied.
 
 ### Snippet sizing
 
@@ -144,6 +148,8 @@ payload_max_chars)` and `SNIPPET_PROFILES`:
 | Env var | Default |
 |---|---|
 | `LLM_ANNOTATIONS_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/LLM_annotations/` |
+| `PROFILE_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/` |
+| `COMPASS_PROFILE_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/` |
 | `BINARY_NEPC_OUTPUT_DIR` | `<data_path>/LLM_NEPC_labels/` |
 | `STAGE_OUTPUT_DIR` | `/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/` |
 | `CAIA_AZURE_OPENAI_ENDPOINT` / `_API_VERSION` / `_MODEL` | DFCI Azure OpenAI endpoint / `2024-04-01-preview` / `gpt-4o` |

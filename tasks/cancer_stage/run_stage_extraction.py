@@ -109,7 +109,7 @@ def parse_args():
     parser.add_argument("--evidence-path", type=Path, default=None,
                         help="Override path to stage_evidence.parquet.")
     parser.add_argument("--mrn-file", type=Path, default=None,
-                        help="Process only these MRNs (Parquet with a DFCI_MRN column).")
+                        help="Process only these MRNs (CSV with a DFCI_MRN column).")
     parser.add_argument("--mrns", default=None,
                         help="Comma- or space-separated MRNs to process.")
     parser.add_argument("--payload-max-chars", type=int, default=DEFAULT_PAYLOAD_MAX_CHARS,

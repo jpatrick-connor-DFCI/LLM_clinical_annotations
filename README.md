@@ -56,7 +56,6 @@ To run from the command line instead:
 # 1. Preprocessing (provider-independent). By default this reads
 # PROFILE_DATA/CLINICAL_NOTES/{PATHOLOGY,IMAGING,PROGRESS}_NOTES.parquet.
 python preprocessing/cli/compile_patient_snippets.py \
-    --mrn-file /path/to/prostate_mrns.parquet \
     --output-path /path/to/snippets.parquet
 
 # 2. Task runner (provider-flagged)
@@ -68,10 +67,10 @@ python tasks/binary_NEPC/run_NEPC_classifier.py \
 Every preprocessing CLI and task runner supports `--help`.
 
 The binary NEPC, Gleason, and longitudinal AVPC/NEPC collectors are
-prostate-specific. Direct PROFILE_DATA parquet runs therefore require
-`--mrns` or `--mrn-file`; only the cancer-stage collector defaults to the full
-pan-cancer cohort. A precompiled prostate Parquet file or note bundle remains usable
-without repeating the cohort argument.
+prostate-specific. Their default cohort is
+`$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; `--mrns` or
+`--mrn-file` can override it. Only the cancer-stage collector defaults to the
+full pan-cancer cohort.
 
 ### Longitudinal AVPC/NEPC
 
@@ -91,7 +90,6 @@ Grounded items that fail validation are quarantined in
 
 ```bash
 python preprocessing/cli/collect_nepc_notes.py \
-    --mrn-file /path/to/prostate_mrns.parquet \
     --output-dir /path/to/avpc_nepc
 
 python tasks/longitudinal_NEPC/build_nepc_timeline.py \
@@ -114,9 +112,14 @@ authenticates via Google Application Default Credentials and reads
 Set `PROFILE_DATA_PATH` to override the default
 `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/` root. Each preprocessing CLI
 also accepts repeated `--notes-parquet` arguments for explicit file overrides.
+Set `COMPASS_PROFILE_DATA_PATH` to override the default
+`/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/` cohort root.
 Raw clinical text and every pipeline-owned evidence, state, metadata, failure,
 and result artifact are stored as Zstandard-compressed Parquet. JSON remains
 only as the LLM wire format or as a value inside a Parquet audit column.
+The default MRN cohort is
+`$COMPASS_PROFILE_DATA_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; externally
+supplied overrides also use CSV with a `DFCI_MRN` column.
 
 The native PROFILE text rows are consumed exactly as emitted by
 `PROFILE_data_processing`. Pathology and imaging Parquets contain

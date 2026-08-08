@@ -61,7 +61,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Classify each prostate patient as NEPC / AVPC / biomarker / conventional with one LLM call."
     )
-    parser.add_argument("--mrn-file", type=Path, default=None)
+    parser.add_argument("--mrn-file", type=Path, default=None,
+                        help="CSV cohort file containing DFCI_MRN values.")
     parser.add_argument("--mrns", default=None)
     parser.add_argument(
         "--snippets-path",

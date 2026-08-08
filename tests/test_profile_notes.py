@@ -1,10 +1,16 @@
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import polars as pl
 
-from preprocessing.config import PROFILE_PATH_IMAGE_COLUMNS, PROFILE_PROGRESS_COLUMNS
-from preprocessing.notes import load_profile_note_mrns, load_profile_notes
+from preprocessing.config import (
+    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    PROFILE_PATH_IMAGE_COLUMNS,
+    PROFILE_PROGRESS_COLUMNS,
+)
+from preprocessing.cli.compile_patient_snippets import parse_args as parse_snippet_args
+from preprocessing.notes import load_profile_note_mrns, load_profile_notes, load_selected_mrns
 from preprocessing.cli.extract_stage_notes import (
     STAGE_TRIGGER_REGEX,
     _load_and_scan_sequential,
@@ -35,6 +41,22 @@ def test_profile_native_column_contract_matches_emitted_parquets():
         "RPT_TEXT",
         "FILE",
     )
+
+
+def test_mrn_cohort_list_is_read_from_csv(tmp_path):
+    cohort_path = tmp_path / "prostate_mrns.csv"
+    pl.DataFrame({"DFCI_MRN": [101, 202, None]}).write_csv(cohort_path)
+
+    assert load_selected_mrns(mrn_file=cohort_path) == {101, 202}
+
+
+def test_prostate_collectors_default_to_compass_profile_icd_cohort(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["compile_patient_snippets.py"])
+
+    assert parse_snippet_args().mrn_file == DEFAULT_ICD_PROSTATE_MRN_CSV
+    assert DEFAULT_ICD_PROSTATE_MRN_CSV.name == "icd_prostate_mrn_flags.csv"
+    assert DEFAULT_ICD_PROSTATE_MRN_CSV.parent.name == "mrn_lists"
+    assert DEFAULT_ICD_PROSTATE_MRN_CSV.parents[1].name == "COMPASS_PROFILE_DATA"
 
 
 def _write_profile_note_fixtures(root: Path):

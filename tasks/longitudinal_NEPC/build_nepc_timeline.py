@@ -257,7 +257,8 @@ def parse_args():
         default=None,
         help="Override evidence metadata path. By default it is derived from --evidence-path.",
     )
-    parser.add_argument("--mrn-file", type=Path, default=None)
+    parser.add_argument("--mrn-file", type=Path, default=None,
+                        help="CSV cohort file containing DFCI_MRN values.")
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--provider", choices=["dfci_gpt", "vertex_ai"], default="dfci_gpt")
     parser.add_argument("--model", default=None)

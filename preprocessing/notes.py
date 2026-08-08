@@ -57,9 +57,12 @@ def load_selected_mrns(mrns_arg=None, mrn_file=None):
     if mrn_file:
         mrn_file = Path(mrn_file)
         suffix = mrn_file.suffix.lower()
-        if suffix != ".parquet":
-            raise ValueError(f"MRN cohort file must be Parquet: {mrn_file}")
-        mrn_df = pl.read_parquet(mrn_file)
+        if suffix == ".csv":
+            mrn_df = pl.read_csv(mrn_file, infer_schema_length=None)
+        elif suffix == ".parquet":
+            mrn_df = pl.read_parquet(mrn_file)
+        else:
+            raise ValueError(f"MRN cohort file must be CSV or Parquet: {mrn_file}")
         if "DFCI_MRN" in mrn_df.columns:
             selected.update(parse_mrn_values(mrn_df["DFCI_MRN"].to_list()))
         elif mrn_df.height > 0:

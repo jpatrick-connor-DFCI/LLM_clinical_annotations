@@ -10,7 +10,7 @@ explicit MRN list is supplied.
 Examples
 --------
 # Extract notes for an explicit MRN list
-python preprocessing/cli/compile_prostate_notes.py --mrn-file prostate_mrns.parquet
+python preprocessing/cli/compile_prostate_notes.py --mrn-file prostate_mrns.csv
 
 # Run with defaults: read cohort MRNs, then select their PROFILE_DATA notes
 python preprocessing/cli/compile_prostate_notes.py
@@ -26,7 +26,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from preprocessing.config import DEFAULT_PROFILE_NOTE_PATHS, PROSTATE_TEXT_PARQUET  # noqa: E402
+from preprocessing.config import (  # noqa: E402
+    DEFAULT_ICD_PROSTATE_MRN_CSV,
+    DEFAULT_PROFILE_NOTE_PATHS,
+    PROSTATE_TEXT_PARQUET,
+)
 from preprocessing.notes import (  # noqa: E402
     load_profile_notes,
     load_selected_mrns,
@@ -34,18 +38,19 @@ from preprocessing.notes import (  # noqa: E402
     write_notes_parquet,
 )
 
-DEFAULT_PROSTATE_MRN_SOURCE = Path(
-    "/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/prostate_arpi_survival_cohort.parquet"
-)
+DEFAULT_PROSTATE_MRN_SOURCE = DEFAULT_ICD_PROSTATE_MRN_CSV
 
 
 def derive_prostate_mrns(cohort_source):
     cohort_source = Path(cohort_source)
     if not cohort_source.exists():
         raise FileNotFoundError(f"Cohort source not found: {cohort_source}")
-    if cohort_source.suffix.lower() != ".parquet":
-        raise ValueError(f"Cohort source must be Parquet: {cohort_source}")
-    cohort = pl.scan_parquet(cohort_source).select("DFCI_MRN").collect()
+    if cohort_source.suffix.lower() == ".csv":
+        cohort = pl.scan_csv(cohort_source).select("DFCI_MRN").collect()
+    elif cohort_source.suffix.lower() == ".parquet":
+        cohort = pl.scan_parquet(cohort_source).select("DFCI_MRN").collect()
+    else:
+        raise ValueError(f"Cohort source must be CSV or Parquet: {cohort_source}")
     return parse_mrn_values(cohort["DFCI_MRN"].to_list())
 
 
@@ -59,7 +64,7 @@ def parse_args():
         "--mrn-file",
         type=Path,
         default=None,
-        help="Parquet file with the prostate DFCI_MRN values to compile.",
+        help="CSV cohort file with the prostate DFCI_MRN values to compile.",
     )
     parser.add_argument(
         "--derive-prostate-mrns",
@@ -71,7 +76,8 @@ def parse_args():
         "--cohort-source",
         type=Path,
         default=DEFAULT_PROSTATE_MRN_SOURCE,
-        help="Parquet source whose DFCI_MRN column defines the default prostate cohort.",
+        help="CSV source whose DFCI_MRN column defines the default prostate cohort; "
+             "defaults to COMPASS_PROFILE_DATA/mrn_lists/icd_prostate_mrn_flags.csv.",
     )
     parser.add_argument(
         "--notes-parquet",

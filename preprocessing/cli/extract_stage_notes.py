@@ -119,7 +119,7 @@ def parse_args():
                     "By default scans all PROFILE_DATA note parquets pan-cancer."
     )
     parser.add_argument("--mrn-file", type=Path, default=None,
-                        help="Optional: restrict the scan using a Parquet DFCI_MRN cohort.")
+                        help="Optional: restrict the scan using a CSV DFCI_MRN cohort.")
     parser.add_argument("--mrns", default=None,
                         help="Optional: comma- or space-separated MRNs to restrict the scan.")
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,

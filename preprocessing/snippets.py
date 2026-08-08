@@ -145,21 +145,37 @@ def scan_note_candidates(
     return candidates
 
 
-def rank_patient_candidates(candidates, *, max_notes_per_patient, payload_max_chars):
+def rank_patient_candidates(
+    candidates,
+    *,
+    max_notes_per_patient,
+    payload_max_chars,
+    all_mrns=None,
+):
     """Rank each patient's candidate notes and keep the top slice under budget.
 
     Ranking: (number of trigger categories, raw trigger count, recency), descending.
     Kept until either `max_notes_per_patient` or the cumulative `payload_max_chars`
     budget is hit, so outlier patients can't exceed the model's context window.
+    When `all_mrns` is supplied, progress covers the full cohort, including
+    patients without notes or trigger candidates.
     """
     ranked = {}
-    for mrn, items in tqdm(
-        candidates.items(),
-        total=len(candidates),
-        desc="Ranking patient snippets",
+    mrns = sorted(
+        {int(mrn) for mrn in all_mrns}
+        if all_mrns is not None
+        else candidates
+    )
+    for mrn in tqdm(
+        mrns,
+        total=len(mrns),
+        desc="Compiling binary NEPC patients",
         unit="patient",
         dynamic_ncols=True,
     ):
+        items = candidates.get(mrn, [])
+        if not items:
+            continue
         items.sort(
             key=lambda c: (
                 len(c["trigger_categories"]),
@@ -216,6 +232,7 @@ def _snippet_cache_key(notes_df, *, max_notes_per_patient, snippet_max_chars, pa
 def build_patient_snippets(
     notes_df,
     *,
+    all_mrns=None,
     max_notes_per_patient=75,
     context_chars=_BINARY_NEPC_PROFILE.context_chars,
     snippet_max_chars=_BINARY_NEPC_PROFILE.max_chars,
@@ -227,7 +244,8 @@ def build_patient_snippets(
 
     Notes without any trigger hit are dropped. The per-note scan (clean + trigger
     match + snippet) runs in parallel across processes. Results are ranked per
-    patient and capped by `max_notes_per_patient` / `payload_max_chars`.
+    patient and capped by `max_notes_per_patient` / `payload_max_chars`. Pass
+    `all_mrns` to report patient-level progress over the complete cohort.
 
     Sizing defaults match `SNIPPET_PROFILES["binary_nepc"]`; callers for other
     tasks should pass values from their own `SnippetProfile` explicitly.
@@ -236,6 +254,14 @@ def build_patient_snippets(
     hash so re-runs over the same cohort skip the whole scan.
     """
     if notes_df.is_empty():
+        if all_mrns is not None:
+            for _ in tqdm(
+                sorted({int(mrn) for mrn in all_mrns}),
+                desc="Compiling binary NEPC patients",
+                unit="patient",
+                dynamic_ncols=True,
+            ):
+                pass
         return {}
 
     cache_path = None
@@ -276,6 +302,7 @@ def build_patient_snippets(
         candidates,
         max_notes_per_patient=max_notes_per_patient,
         payload_max_chars=payload_max_chars,
+        all_mrns=all_mrns,
     )
 
     if cache_path is not None:

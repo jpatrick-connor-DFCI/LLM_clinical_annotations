@@ -4,8 +4,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from tqdm.auto import tqdm
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -77,7 +75,6 @@ def parse_args():
 
 
 def run(args):
-    progress = tqdm(total=4, desc="Compile binary snippets", unit="step", dynamic_ncols=True)
     if args.output_path.exists() and not args.overwrite:
         raise FileExistsError(
             f"Patient snippet bundle already exists: {args.output_path}. "
@@ -99,7 +96,6 @@ def run(args):
         parquet_paths=parquet_paths,
         bundle_path=args.note_bundle_path,
     )
-    progress.update(1)
     print(f"Note source: {source_label} ({source_path})")
 
     notes_df = load_notes(
@@ -116,17 +112,16 @@ def run(args):
     all_mrns = set(selected_mrns) if selected_mrns is not None else patients_with_notes
     no_note_mrns = all_mrns - patients_with_notes
     print(f"Loaded notes: {len(notes_df)} rows for {len(all_mrns)} patients")
-    progress.update(1)
 
     patient_snippets = build_patient_snippets(
         notes_df,
+        all_mrns=all_mrns,
         max_notes_per_patient=args.max_notes_per_patient,
         context_chars=_PROFILE.context_chars,
         snippet_max_chars=_PROFILE.max_chars,
         payload_max_chars=_PROFILE.payload_max_chars,
         max_workers=args.scan_workers,
     )
-    progress.update(1)
     write_snippet_bundle(
         args.output_path,
         all_mrns=all_mrns,
@@ -140,8 +135,6 @@ def run(args):
             "no_note_mrns": sorted(no_note_mrns),
         },
     )
-    progress.update(1)
-    progress.close()
 
     print(f"Wrote patient snippet bundle: {args.output_path}")
     print(f"Patients with triggered snippets: {len(patient_snippets)}")

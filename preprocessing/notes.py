@@ -171,15 +171,20 @@ def load_note_bundle(path, selected_mrns=None):
     if not bundle_path.exists():
         raise FileNotFoundError(f"Note bundle not found: {bundle_path}")
     try:
-        df = normalize_mrn_column(pl.read_parquet(bundle_path))
+        lazy = pl.scan_parquet(bundle_path)
+        if selected_mrns is not None:
+            lazy = lazy.filter(
+                pl.col("DFCI_MRN")
+                .cast(pl.Int64, strict=False)
+                .is_in(selected_mrns)
+            )
+        df = normalize_mrn_column(lazy.collect())
     except (OSError, pl.exceptions.PolarsError) as exc:
         raise ValueError(f"Invalid note Parquet bundle: {bundle_path}") from exc
     if df.is_empty():
-        raise ValueError(f"No note rows in bundle: {bundle_path}")
-    if selected_mrns is not None:
-        df = df.filter(pl.col("DFCI_MRN").is_in(selected_mrns))
-        if df.is_empty():
+        if selected_mrns is not None:
             raise ValueError("No notes after MRN filter.")
+        raise ValueError(f"No note rows in bundle: {bundle_path}")
     return df
 
 

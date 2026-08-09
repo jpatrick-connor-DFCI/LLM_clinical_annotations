@@ -3,7 +3,7 @@
 
 # Bump this whenever either prompt's semantics or output contract changes. The
 # stage-2 run fingerprint includes both this value and the complete prompt text.
-PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v4"
+PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v5"
 
 
 CANONICAL_CRITERIA = """
@@ -48,14 +48,18 @@ single patient's de-identified note snippets.
 ## TASK
 1. Report a criterion in `criteria_found` only when this chunk alone contains
    all evidence required by its canonical definition.
-2. Also report every relevant atomic fact in `evidence_items`, even when the
-   chunk does not contain enough information to establish the full criterion.
+2. Report only criterion-determining atomic facts in `evidence_items`, even when
+   the chunk does not contain enough information to establish the full criterion.
    These compact items will be combined with other chunks in a patient-level
    synthesis step. Examples include a PSA value, bone-lesion count, NE stain,
    LDH/CEA value and ULN, ADT start date, CRPC progression date, metastatic
    organ, concurrent bone disease, mass measurement, and Gleason score.
-   De-duplicate repeated facts and return at most 30 evidence items, prioritizing
-   threshold values, dates, disease sites, and the earliest/strongest support.
+   Do NOT emit routine repeated measurements, generic prostate-cancer history,
+   a separate item for every mention of the same event, or facts that cannot
+   help establish one of the definitions above. De-duplicate copy-forward and
+   repeated facts. Return at most 30 evidence items under all circumstances;
+   if more are available, retain threshold-crossing values, the earliest event,
+   disease sites needed for C2 exclusivity, and the strongest pathology first.
 
    Use only these `fact_type` values for each candidate criterion:
    - C1: small_cell_histology
@@ -71,6 +75,10 @@ single patient's de-identified note snippets.
    - NEPC:ne_features: neuroendocrine_features
    - NEPC:positive_ne_ihc: positive_ne_ihc
 
+   `candidate_criterion` and `fact_type` must be one exact pair from that list.
+   Never put a criterion prefix in `fact_type` (use `bone_metastasis_status`,
+   not `C2:bone_metastasis_status`) and never invent a synonym or new fact type.
+
 ## RULES
 - Use only the snippets. Findings must be documented as present, not suspected,
   planned, pending, ruled out, negative, or family history.
@@ -79,8 +87,13 @@ single patient's de-identified note snippets.
 - Pathology is most authoritative for histology/IHC and imaging for disease sites.
 - `diagnosis_date` / `fact_date` is the finding date stated in the text. Return
   null when none is stated; never invent or copy the note date into this field.
+  Dates must be valid `YYYY-MM-DD`: normalize a stated year to January 1 and a
+  stated year-month to the first of that month. Never emit `xx`, `00`, seasons,
+  ranges, or impossible calendar dates.
 - `source_note_date` must exactly copy the `note_date` of the supporting snippet.
 - Quotes must be verbatim excerpts from the supplied snippet.
+- Each evidence-item quote must itself contain the words/numbers supporting its
+  `fact_type`; do not use a nearby quote that supports only a different fact.
 - modality: "pathology" | "imaging" | "clinical" | "labs".
 - confidence: "high" | "medium" | "low".
 - Report C2 in `criteria_found` only when this chunk establishes EXCLUSIVELY

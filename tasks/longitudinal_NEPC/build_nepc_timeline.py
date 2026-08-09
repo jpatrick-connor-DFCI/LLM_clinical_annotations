@@ -166,13 +166,49 @@ VALID_FACT_TYPES_BY_CRITERION = {
     "NEPC:positive_ne_ihc": {"positive_ne_ihc"},
 }
 
+# Every atomic fact type has exactly one canonical destination.  Models
+# occasionally return a valid fact under the criterion it was mentioned near
+# (for example C5:bone_metastasis_status) or include the criterion in fact_type.
+# Routing by this table is a lossless schema repair: the quote still has to pass
+# provenance and semantic validation below.
+FACT_TYPE_TO_CRITERION = {
+    fact_type: criterion
+    for criterion, fact_types in VALID_FACT_TYPES_BY_CRITERION.items()
+    for fact_type in fact_types
+}
+
+FACT_TYPE_ALIASES = {
+    "small_cell_dx": "small_cell_diagnosis",
+    "ne_features": "neuroendocrine_features",
+    "ne_ihc": "positive_ne_ihc",
+    "positive_neuroendocrine_ihc": "positive_ne_ihc",
+    "visceral_metastasis_site": "visceral_site",
+    "visceral_met_pattern": "visceral_site",
+    "bone_metastases_count": "bone_metastasis_count",
+    "bone_lesion_count": "bone_metastasis_count",
+    "adt_start": "hormonal_therapy_start",
+    "adt_start_date": "hormonal_therapy_start",
+    "crpc_progression_date": "crpc_progression",
+}
+
+MODALITY_ALIASES = {
+    "clinician": "clinical",
+    "physical_exam": "clinical",
+    "treatment": "clinical",
+    "staging": "clinical",
+    "radiology": "imaging",
+    "radiographic": "imaging",
+    "laboratory": "labs",
+    "lab": "labs",
+}
+
 CRITERION_QUOTE_PATTERNS = {
-    "C1": r"\bsmall[\s-]?cell\b",
+    "C1": r"\b(?:small[\s-]?cell|scpc|scnc|oat[\s-]?cell)\b",
     "C2": (
         r"\b(?:visceral|liver|hepatic|lung|pulmonary|adrenal|brain|"
         r"pleur\w*|peritone\w*)\b"
     ),
-    "C3": r"\b(?:lytic|destructive\s+bone)\b",
+    "C3": r"\b(?:lytic|osteolytic|destructive\s+bone)\b",
     "C4": (
         r"\b(?:bulky|lymphadenopathy|adenopathy|nodal|prostat\w*|pelvic|gleason)\b"
         r"|(?:\b(?:[5-9]|[1-9]\d+)(?:\.\d+)?\s*cm\b)"
@@ -186,7 +222,10 @@ CRITERION_QUOTE_PATTERNS = {
         r"\b(?:castration[\s-]?resistant|androgen[\s-]?independent|"
         r"androgen\s+deprivation|adt|hormonal\s+therapy|progress\w*)\b"
     ),
-    "NEPC:small_cell_dx": r"\b(?:small[\s-]?cell|neuroendocrine\s+carcinoma)\b",
+    "NEPC:small_cell_dx": (
+        r"\b(?:small[\s-]?cell|scpc|scnc|oat[\s-]?cell|"
+        r"neuroendocrine\s+carcinoma|nepc)\b"
+    ),
     "NEPC:histologic_transformation": (
         r"\b(?:transform\w*|transdifferentiat\w*|treatment[\s-]?emergent)\b"
     ),
@@ -198,13 +237,15 @@ CRITERION_QUOTE_PATTERNS = {
 }
 
 FACT_TYPE_QUOTE_PATTERNS = {
-    "small_cell_histology": CRITERION_QUOTE_PATTERNS["C1"],
+    "small_cell_histology": (
+        r"\b(?:small[\s-]?cell|scpc|scnc|oat[\s-]?cell)\b"
+    ),
     "visceral_site": CRITERION_QUOTE_PATTERNS["C2"],
     "bone_metastasis_status": r"\b(?:bone|osseous|skeletal)\b",
     "non_visceral_metastasis_status": (
         r"\b(?:bone|osseous|skeletal|nodal|lymph\s+node|soft[\s-]?tissue)\b"
     ),
-    "lytic_bone_pattern": CRITERION_QUOTE_PATTERNS["C3"],
+    "lytic_bone_pattern": r"\b(?:lytic|osteolytic|destructive\s+bone)\b",
     "bulky_nodal_measurement": (
         r"\b(?:bulky|lymphadenopathy|adenopathy|nodal|lymph\s+node)\b"
         r"|(?:\b\d+(?:\.\d+)?\s*(?:cm|mm)\b)"
@@ -215,8 +256,10 @@ FACT_TYPE_QUOTE_PATTERNS = {
     "gleason_score": r"\bgleason\b",
     "psa_value": r"\bpsa\b",
     "disease_context": (
-        r"\b(?:initial\s+presentation|symptomatic|castration[\s-]?resistant|"
-        r"crpc|progress\w*|before\s+(?:adt|androgen\s+deprivation))\b"
+        r"\b(?:initial\s+(?:presentation|diagnosis)|de[\s-]?novo|symptomatic|"
+        r"castrat\w*[\s-]?resistant|m?crpc|hormone[\s-]?refractory|"
+        r"androgen[\s-]?(?:independent|refractory)|progress\w*|"
+        r"before\s+(?:adt|androgen\s+deprivation))\b"
     ),
     "bone_metastasis_count": r"\b(?:bone|osseous|skeletal|lesion\w*)\b",
     "neuroendocrine_marker": (
@@ -230,11 +273,12 @@ FACT_TYPE_QUOTE_PATTERNS = {
     ),
     "hormonal_therapy_start": (
         r"\b(?:androgen\s+deprivation|adt|hormonal\s+therapy|leuprolide|"
-        r"lupron|degarelix|firmagon|relugolix|orgovyx|orchiectomy)\b"
+        r"lupron|degarelix|firmagon|relugolix|orgovyx|goserelin|zoladex|"
+        r"triptorelin|trelstar|orchiectomy)\b"
     ),
     "crpc_progression": (
-        r"\b(?:castration[\s-]?resistant|androgen[\s-]?independent|crpc|"
-        r"progress\w*)\b"
+        r"\b(?:castrat\w*[\s-]?resistant|androgen[\s-]?(?:independent|"
+        r"refractory)|m?crpc|hormone[\s-]?refractory|progress\w*)\b"
     ),
     "small_cell_diagnosis": CRITERION_QUOTE_PATTERNS["NEPC:small_cell_dx"],
     "histologic_transformation": CRITERION_QUOTE_PATTERNS[
@@ -418,6 +462,55 @@ def _normalized_text(value):
     return flatten_ws(value) or ""
 
 
+def normalize_fact_type(value):
+    """Return a canonical atomic fact type after safe formatting repairs."""
+    text = _normalized_text(value).lower().replace("-", "_").replace(" ", "_")
+    text = re.sub(r"_+", "_", text).strip("_")
+    if ":" in text:
+        # Handles outputs such as ``C5:bone_metastasis_status`` and
+        # ``NEPC:positive_ne_ihc:small_cell_diagnosis``.  Only a recognized
+        # terminal fact type is accepted, so arbitrary labels cannot pass.
+        suffixes = text.split(":")
+        for suffix in reversed(suffixes):
+            candidate = FACT_TYPE_ALIASES.get(suffix, suffix)
+            if candidate in FACT_TYPE_TO_CRITERION:
+                return candidate
+    text = FACT_TYPE_ALIASES.get(text, text)
+    return text if text in FACT_TYPE_TO_CRITERION else None
+
+
+def _modality_from_note_type(note_type):
+    text = _normalized_text(note_type).lower()
+    if "path" in text or "cytolog" in text:
+        return "pathology"
+    if any(token in text for token in ("imag", "radiol", "scan", "nuclear")):
+        return "imaging"
+    if any(token in text for token in ("lab", "chem", "hematolog")):
+        return "labs"
+    return "clinical"
+
+
+def _normalize_modality(value, note_type):
+    text = _normalized_text(value).lower().replace(" ", "_")
+    text = MODALITY_ALIASES.get(text, text)
+    if text in VALID_MODALITIES:
+        return text
+    if text in {"", "none", "null", "unknown", "n/a"}:
+        return _modality_from_note_type(note_type)
+    return None
+
+
+def _normalize_confidence(value):
+    text = _normalized_text(value).lower()
+    if text in VALID_CONFIDENCE:
+        return text
+    # Missing confidence is metadata incompleteness, not evidence failure.  The
+    # conservative repair is low; provenance and semantic checks still apply.
+    if text in {"", "none", "null", "unknown", "n/a"}:
+        return "low"
+    return None
+
+
 def _quote_core(quote):
     """Strip decoration models add around otherwise-verbatim quotes.
 
@@ -451,7 +544,7 @@ def _fold_quote_chars(text):
 
 
 def _find_support_note(item, chunks):
-    """Return `(chunk_index, note_date)` containing this item's quote, else None.
+    """Return `(chunk_index, note_date, note_type)` containing the quote, else None.
 
     Prefer the cited source date. If the quote is grounded in a different note,
     return that note's actual date so callers can correct provenance *before*
@@ -467,12 +560,14 @@ def _find_support_note(item, chunks):
         for note in chunk:
             snippet = _fold_quote_chars(_normalized_text(note.get("snippet"))).lower()
             if quote in snippet:
-                matches.append((chunk_index, note.get("note_date")))
+                matches.append(
+                    (chunk_index, note.get("note_date"), note.get("note_type"))
+                )
     if not matches:
         return None
-    for chunk_index, note_date in matches:
+    for chunk_index, note_date, note_type in matches:
         if note_date == source_date:
-            return chunk_index, note_date
+            return chunk_index, note_date, note_type
     # Identical/copy-forward text can occur on multiple dates. The earliest
     # grounded note is the conservative documented-onset provenance.
     return min(
@@ -505,12 +600,6 @@ def _validate_common_finding(item, chunks, *, date_field):
     criterion = normalize_criterion(item.get("criterion") or item.get("candidate_criterion"))
     if criterion is None:
         return None, f"invalid_criterion:{item.get('criterion') or item.get('candidate_criterion')}"
-    modality = item.get("modality")
-    confidence = item.get("confidence")
-    if modality not in VALID_MODALITIES:
-        return None, f"invalid_modality:{modality}"
-    if confidence not in VALID_CONFIDENCE:
-        return None, f"invalid_confidence:{confidence}"
     quote = _normalized_text(item.get("quote"))
     if not quote:
         return None, "missing_quote"
@@ -520,10 +609,20 @@ def _validate_common_finding(item, chunks, *, date_field):
     support = _find_support_note(normalized, chunks)
     if support is None:
         return None, "quote_or_source_not_in_evidence"
-    support_index, actual_source_date = support
+    support_index, actual_source_date, support_note_type = support
     if normalized["source_note_date"] != actual_source_date:
         normalized["_claimed_source_note_date"] = normalized["source_note_date"]
         normalized["source_note_date"] = actual_source_date
+    modality = _normalize_modality(item.get("modality"), support_note_type)
+    if modality is None:
+        return None, f"invalid_modality:{item.get('modality')}"
+    confidence = _normalize_confidence(item.get("confidence"))
+    if confidence is None:
+        return None, f"invalid_confidence:{item.get('confidence')}"
+    if modality != item.get("modality"):
+        normalized["_claimed_modality"] = item.get("modality")
+    if confidence != item.get("confidence"):
+        normalized["_claimed_confidence"] = item.get("confidence")
     normalized[date_field] = item.get(date_field)
     if item.get(date_field) not in (None, "", "null", "None"):
         stated_iso, _ = parse_stated_date(item.get(date_field))
@@ -608,34 +707,68 @@ def validate_map_result(result, chunks):
         normalized["visceral_met_pattern"] = vmp
         normalized_found.append(normalized)
 
-    normalized_evidence = []
+    validated_evidence = []
+    evidence_keys = set()
     for item in evidence_items:
-        # Cap evidence items by truncation rather than rejecting the chunk: the limit
-        # exists to bound payload size for the synthesis call, and the prompt already
-        # asks the model to prioritize, so keeping the first N loses least.
-        if len(normalized_evidence) >= MAX_EVIDENCE_ITEMS_PER_CHUNK:
-            record_rejection("evidence_items_over_cap", item)
+        if not isinstance(item, dict):
+            record_rejection("finding_not_object", item)
             continue
-        normalized, error = _validate_common_finding(item, chunks, date_field="fact_date")
-        if error:
-            record_rejection(error, item)
-            continue
-        fact_type = _normalized_text(item.get("fact_type"))
+        claimed_criterion = normalize_criterion(item.get("candidate_criterion"))
+        fact_type = normalize_fact_type(item.get("fact_type"))
         fact_value = _normalized_text(item.get("fact_value"))
-        if not fact_type or not fact_value:
+        if not _normalized_text(item.get("fact_type")) or not fact_value:
             record_rejection("missing_fact_type_or_value", item)
             continue
-        criterion = normalized["criterion"]
-        if fact_type not in VALID_FACT_TYPES_BY_CRITERION[criterion]:
-            record_rejection(f"invalid_fact_type:{criterion}:{fact_type}", item)
+        if fact_type is None:
+            record_rejection(
+                f"invalid_fact_type:{item.get('candidate_criterion')}:"
+                f"{item.get('fact_type')}",
+                item,
+            )
+            continue
+        criterion = FACT_TYPE_TO_CRITERION[fact_type]
+        prepared = dict(item)
+        prepared["candidate_criterion"] = criterion
+        normalized, error = _validate_common_finding(
+            prepared, chunks, date_field="fact_date"
+        )
+        if error:
+            record_rejection(error, item)
             continue
         if not _quote_supports_fact_type(fact_type, normalized["quote"]):
             record_rejection(f"quote_does_not_support_fact_type:{fact_type}", item)
             continue
+        if claimed_criterion != criterion:
+            normalized["_claimed_candidate_criterion"] = item.get(
+                "candidate_criterion"
+            )
+        if _normalized_text(item.get("fact_type")) != fact_type:
+            normalized["_claimed_fact_type"] = item.get("fact_type")
         normalized["candidate_criterion"] = normalized.pop("criterion")
         normalized["fact_type"] = fact_type
         normalized["fact_value"] = fact_value
-        normalized_evidence.append(normalized)
+        # Exact copy-forward facts add synthesis payload without adding evidence.
+        # De-duplicate after normalization so harmless formatting differences do
+        # not consume the hard per-chunk cap.
+        evidence_key = (
+            criterion,
+            fact_type,
+            fact_value.casefold(),
+            _normalized_text(normalized.get("fact_date")).casefold(),
+            normalized.get("source_note_date"),
+            normalized["quote"].casefold(),
+        )
+        if evidence_key in evidence_keys:
+            continue
+        evidence_keys.add(evidence_key)
+        validated_evidence.append((normalized, item))
+
+    normalized_evidence = [
+        normalized
+        for normalized, _ in validated_evidence[:MAX_EVIDENCE_ITEMS_PER_CHUNK]
+    ]
+    for _, original in validated_evidence[MAX_EVIDENCE_ITEMS_PER_CHUNK:]:
+        record_rejection("evidence_items_over_cap", original)
     return (
         {
             "criteria_found": normalized_found,

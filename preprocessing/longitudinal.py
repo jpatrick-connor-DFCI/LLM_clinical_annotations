@@ -176,6 +176,20 @@ def parse_stated_date(text):
     if not stripped or stripped.lower() == "nan":
         return None, "unknown"
 
+    # Models sometimes preserve unknown ISO components as ``xx`` despite being
+    # asked to use the first day of the known period.  These two forms are
+    # unambiguous and can be normalized without inventing precision.  Invalid
+    # zero components, ranges, seasons, and impossible dates remain rejected.
+    partial_month = re.fullmatch(r"(\d{4})-(\d{1,2})-[xX]{2}", stripped)
+    if partial_month:
+        year, month = map(int, partial_month.groups())
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}-01", "month"
+        return None, "unknown"
+    partial_year = re.fullmatch(r"(\d{4})-[xX]{2}(?:-[xX]{2})?", stripped)
+    if partial_year:
+        return f"{int(partial_year.group(1)):04d}-01-01", "year"
+
     try:
         parsed_a = date_parser.parse(stripped, default=_ANCHOR_A)
         parsed_b = date_parser.parse(stripped, default=_ANCHOR_B)

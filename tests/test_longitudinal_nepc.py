@@ -60,6 +60,8 @@ def test_prompt_uses_canonical_aparicio_thresholds():
     assert "high-volume (>=20) bone metastases" in combined
     assert "LDH >=2 times" in combined
     assert "<=6 months" in combined
+    assert "at most 30 evidence items under all circumstances" in combined
+    assert "Never put a criterion prefix in `fact_type`" in combined
 
 
 @pytest.mark.parametrize(
@@ -299,6 +301,71 @@ def test_atomic_fact_semantics_are_validated_by_fact_type(
         assert normalized["rejected"] == {
             "quote_does_not_support_fact_type:gleason_score": 1
         }
+
+
+def test_known_fact_type_is_routed_to_its_canonical_criterion():
+    """A grounded fact survives when the model attaches it to the wrong criterion."""
+    result = _map_result(
+        "C5",
+        "Bone scan demonstrates at least 24 osseous metastases.",
+        "2021-06-05",
+        fact_type="C5:bone_metastasis_status",
+        fact_value="present",
+    )
+    normalized, error = nepc.validate_map_result(result, _chunks())
+    assert error is None
+    assert not normalized["rejected"]
+    item = normalized["evidence_items"][0]
+    assert item["candidate_criterion"] == "C2"
+    assert item["fact_type"] == "bone_metastasis_status"
+    assert item["_claimed_candidate_criterion"] == "C5"
+    assert item["_claimed_fact_type"] == "C5:bone_metastasis_status"
+
+
+def test_missing_enums_are_conservatively_repaired_from_grounded_note():
+    result = _map_result(
+        "C5",
+        "Bone scan demonstrates at least 24 osseous metastases.",
+        "2021-06-05",
+        fact_type="bone_metastasis_count",
+        fact_value="24",
+    )
+    item = result["evidence_items"][0]
+    item["modality"] = "none"
+    item["confidence"] = None
+    normalized, error = nepc.validate_map_result(result, _chunks())
+    assert error is None
+    repaired = normalized["evidence_items"][0]
+    assert repaired["modality"] == "imaging"
+    assert repaired["confidence"] == "low"
+    assert repaired["_claimed_modality"] == "none"
+    assert repaired["_claimed_confidence"] is None
+
+
+def test_duplicate_evidence_does_not_consume_item_cap():
+    item = _map_result(
+        "C5",
+        "At progression PSA was 7.2 ng/mL.",
+        "2021-06-03",
+        fact_type="psa_value",
+        fact_value="7.2 ng/mL",
+    )["evidence_items"][0]
+    result = {"criteria_found": [], "evidence_items": [dict(item) for _ in range(40)]}
+    normalized, error = nepc.validate_map_result(result, _chunks())
+    assert error is None
+    assert len(normalized["evidence_items"]) == 1
+    assert "evidence_items_over_cap" not in normalized["rejected"]
+
+
+@pytest.mark.parametrize(
+    ("stated", "expected", "precision"),
+    [
+        ("2015-07-xx", "2015-07-01", "month"),
+        ("2011-xx-xx", "2011-01-01", "year"),
+    ],
+)
+def test_unknown_iso_date_components_are_normalized(stated, expected, precision):
+    assert nepc.parse_stated_date(stated) == (expected, precision)
 
 
 def test_synthesis_keeps_earliest_duplicate_criterion():

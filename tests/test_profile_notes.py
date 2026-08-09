@@ -56,7 +56,7 @@ def test_prostate_collectors_default_to_compass_profile_adt_cohort(monkeypatch):
     assert parse_snippet_args().mrn_file == DEFAULT_ADT_MRN_CSV
     assert DEFAULT_ADT_MRN_CSV.name == "adt_mrns.csv"
     assert DEFAULT_ADT_MRN_CSV.parent.name == "mrn_lists"
-    assert DEFAULT_ADT_MRN_CSV.parents[1].name == "COMPASS_PROFILE_DATA"
+    assert DEFAULT_ADT_MRN_CSV.parents[1].name == "COMPASS"
 
 
 def _write_profile_note_fixtures(root: Path):

@@ -3,7 +3,7 @@
 Selects clinical notes for a prostate MRN list from the merged PROFILE_DATA
 parquets and writes a `prostate_text_data.parquet` artifact.
 
-The default cohort source is the COMPASS_PROFILE_DATA ADT MRN list. The
+The default cohort source is the COMPASS ADT MRN list. The
 `DFCI_MRN` column from that file defines which patients are included when no
 explicit MRN list is supplied.
 
@@ -58,7 +58,7 @@ def derive_prostate_mrns(cohort_source):
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Select PROFILE_DATA notes into prostate_text_data.parquet. "
-        "By default, cohort MRNs come from the COMPASS_PROFILE_DATA ADT MRN list."
+        "By default, cohort MRNs come from the COMPASS ADT MRN list."
     )
     parser.add_argument("--mrns", default=None, help="Comma-separated DFCI_MRN values to include.")
     parser.add_argument(
@@ -78,7 +78,7 @@ def parse_args():
         type=Path,
         default=DEFAULT_PROSTATE_MRN_SOURCE,
         help="CSV source whose DFCI_MRN column defines the default prostate cohort; "
-             "defaults to COMPASS_PROFILE_DATA/mrn_lists/adt_mrns.csv.",
+             "defaults to COMPASS/mrn_lists/adt_mrns.csv.",
     )
     parser.add_argument(
         "--notes-parquet",

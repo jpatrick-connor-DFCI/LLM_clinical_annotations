@@ -67,7 +67,7 @@ def parse_args():
         type=Path,
         default=DEFAULT_ADT_MRN_CSV,
         help="CSV cohort file containing DFCI_MRN values; defaults to the "
-             "COMPASS_PROFILE_DATA ADT cohort.",
+             "COMPASS ADT cohort.",
     )
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,

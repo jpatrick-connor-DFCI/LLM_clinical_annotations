@@ -16,7 +16,12 @@ from preprocessing.bundles.snippet_bundle import (
 from preprocessing.notes import load_notes
 from preprocessing.parquet_io import write_metadata
 from preprocessing.triggers import TRIGGER_REGEX, find_trigger_matches
-from tasks.binary_NEPC.run_NEPC_classifier import make_row, validate_result
+from tasks.binary_NEPC.run_NEPC_classifier import (
+    _normalize_model_result,
+    classify_patient,
+    make_row,
+    validate_result,
+)
 from tasks.binary_NEPC.prompts import CLASSIFY_SYSTEM_PROMPT
 from tasks.cancer_stage.run_stage_extraction import validate_stage_finding
 from tasks.gleason_score.build_gleason_timeline import (
@@ -206,6 +211,98 @@ def test_binary_result_validation_rejects_malformed_and_ungrounded_output():
     invented["supporting_quotes"] = ["This quote was never in the evidence."]
     assert validate_result(invented, snippets)[1] == (
         "supporting_quote_or_date_not_in_evidence"
+    )
+
+
+def test_binary_result_normalization_repairs_deterministic_model_mistakes():
+    quote = "Somatic testing found PTEN and TP53 alterations in the prostate tumor."
+    snippets = [
+        {
+            "note_date": "2024-03-04",
+            "note_type": "Pathology",
+            "trigger_categories": ["avpc", "biomarker"],
+            "snippet": f"Aggressive variant prostate cancer. {quote}",
+        }
+    ]
+    malformed = {
+        "primary_label": "conventional",
+        "has_nepc": False,
+        "has_avpc": True,
+        "has_biomarker": False,
+        "has_molecular_avpc": False,
+        "has_non_prostate_primary": False,
+        "biomarker_genes": ["PTEN", "TP53"],
+        "avpc_criteria": "C3",
+        "visceral_met_pattern": "visceral_only",
+        "non_prostate_primary_types": [],
+        "supporting_quotes": quote,
+        "supporting_quote_dates": [],
+        "confidence": "high",
+        "rationale": "The chart documents AVPC and two molecular AVPC genes.",
+    }
+
+    normalized = _normalize_model_result(malformed, snippets)
+
+    assert normalized["primary_label"] == "avpc"
+    assert normalized["has_molecular_avpc"] is True
+    assert normalized["avpc_criteria"] == ["C3"]
+    assert normalized["visceral_met_pattern"] == "none"
+    assert normalized["supporting_quotes"] == [quote]
+    assert normalized["supporting_quote_dates"] == ["2024-03-04"]
+    assert validate_result(normalized, snippets) == (normalized, None)
+
+
+def test_binary_classifier_retries_ungrounded_and_truncated_output_with_feedback():
+    quote = "The prostate biopsy shows small-cell neuroendocrine carcinoma."
+    snippets = [
+        {
+            "note_date": "2024-01-01",
+            "note_type": "Pathology",
+            "trigger_categories": ["nepc"],
+            "snippet": quote,
+        }
+    ]
+    valid = {
+        "primary_label": "nepc",
+        "has_nepc": True,
+        "has_avpc": True,
+        "has_biomarker": False,
+        "has_molecular_avpc": False,
+        "has_non_prostate_primary": False,
+        "biomarker_genes": [],
+        "avpc_criteria": ["C1"],
+        "visceral_met_pattern": "none",
+        "non_prostate_primary_types": [],
+        "supporting_quotes": [quote],
+        "supporting_quote_dates": ["2024-01-01"],
+        "confidence": "high",
+        "rationale": "Pathology is definitive.",
+    }
+
+    class Provider:
+        def __init__(self):
+            self.calls = []
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return None, "truncated_response: finish_reason=MAX_TOKENS"
+            if len(self.calls) == 2:
+                ungrounded = dict(valid, supporting_quotes=["Invented quote."])
+                return json.dumps(ungrounded), None
+            return json.dumps(valid), None
+
+    provider = Provider()
+    result, error = classify_patient(
+        provider, None, "model", 3, 1, snippets, max_output_correction_retries=2
+    )
+
+    assert error is None
+    assert result == valid
+    assert len(provider.calls) == 3
+    assert "truncated_response" in provider.calls[1][-1]["content"]
+    assert "supporting_quote_or_date_not_in_evidence" in (
+        provider.calls[2][-1]["content"]
     )
 
 

@@ -40,14 +40,14 @@ def call_with_retry(client, model_name, messages, max_retries=3):
     user_parts = [m["content"] for m in messages if m["role"] == "user"]
     system_instruction = "\n\n".join(system_parts) if system_parts else None
 
+    # Gemini 2.5 Flash/Flash-Lite can use up to 8K tokens for thinking alone, so
+    # leave another 8K for JSON while retaining the existing cap for other models.
+    max_output_tokens = 16384 if "gemini-2.5" in model_name.lower() else 8192
     generation_config = genai_types.GenerateContentConfig(
         temperature=0,
         response_mime_type="application/json",
         system_instruction=system_instruction,
-        # Gemini Flash's real ceiling is 8192; request it explicitly so a
-        # truncated response fails fast via finish_reason=MAX_TOKENS below
-        # rather than silently defaulting to a smaller cap.
-        max_output_tokens=8192,
+        max_output_tokens=max_output_tokens,
     )
 
     for attempt in range(max_retries):

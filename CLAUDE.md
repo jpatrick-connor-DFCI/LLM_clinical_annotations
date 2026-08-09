@@ -128,7 +128,7 @@ failed rows, raw findings, and final timelines/labels. JSON is restricted to
 provider request/response payloads and serialized audit values inside Parquet.
 Externally supplied MRN cohort lists are CSV inputs and are not pipeline artifacts.
 The prostate-specific collectors default to
-`$COMPASS_PROFILE_DATA_PATH/mrn_lists/adt_mrns.csv`; cancer stage
+`$COMPASS_PATH/mrn_lists/adt_mrns.csv`; cancer stage
 remains pan-cancer unless an MRN restriction is supplied.
 
 ### Snippet sizing
@@ -149,7 +149,7 @@ payload_max_chars)` and `SNIPPET_PROFILES`:
 |---|---|
 | `LLM_ANNOTATIONS_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/LLM_annotations/` |
 | `PROFILE_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/` |
-| `COMPASS_PROFILE_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/` |
+| `COMPASS_PATH` | `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/` |
 | `BINARY_NEPC_OUTPUT_DIR` | `<data_path>/LLM_NEPC_labels/` |
 | `STAGE_OUTPUT_DIR` | `/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/` |
 | `CAIA_AZURE_OPENAI_ENDPOINT` / `_API_VERSION` / `_MODEL` | DFCI Azure OpenAI endpoint / `2024-04-01-preview` / `gpt-4o` |

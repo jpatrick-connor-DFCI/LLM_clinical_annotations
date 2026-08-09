@@ -89,6 +89,11 @@ def call_with_retry(client, model_name, messages, max_retries=3):
             )
             if response.choices[0].finish_reason == "content_filter":
                 return None, "content_filter_response"
+            if response.choices[0].finish_reason in ("length", "max_tokens"):
+                return None, (
+                    "truncated_response: finish_reason="
+                    f"{response.choices[0].finish_reason}"
+                )
             content = response.choices[0].message.content
             if content is None:
                 return None, f"empty_response: finish_reason={response.choices[0].finish_reason}"

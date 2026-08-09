@@ -46,7 +46,7 @@ def parse_args():
         type=Path,
         default=DEFAULT_ADT_MRN_CSV,
         help="CSV cohort file containing the prostate DFCI_MRN values; defaults "
-             "to the COMPASS_PROFILE_DATA ADT cohort.",
+             "to the COMPASS ADT cohort.",
     )
     return parser.parse_args()
 

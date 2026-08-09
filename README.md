@@ -67,11 +67,17 @@ python tasks/binary_NEPC/run_NEPC_classifier.py \
     --provider dfci_gpt   # or vertex_ai
 ```
 
+Binary NEPC deterministically repairs harmless schema drift (such as a scalar
+returned instead of a one-item list or a grounded quote paired with the wrong
+note date). Malformed, ungrounded, inconsistent, or truncated responses receive
+up to two corrective calls before the patient is written to the failure
+Parquet; configure this with `--max-output-correction-retries`.
+
 Every preprocessing CLI and task runner supports `--help`.
 
 The binary NEPC, Gleason, and longitudinal AVPC/NEPC collectors are
 prostate-specific. Their default cohort is
-`$COMPASS_PROFILE_DATA_PATH/mrn_lists/adt_mrns.csv`; `--mrns` or
+`$COMPASS_PATH/mrn_lists/adt_mrns.csv`; `--mrns` or
 `--mrn-file` can override it. Only the cancer-stage collector defaults to the
 full pan-cancer cohort.
 
@@ -115,13 +121,13 @@ authenticates via Google Application Default Credentials and reads
 Set `PROFILE_DATA_PATH` to override the default
 `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/` root. Each preprocessing CLI
 also accepts repeated `--notes-parquet` arguments for explicit file overrides.
-Set `COMPASS_PROFILE_DATA_PATH` to override the default
-`/data/gusev/USERS/jpconnor/data/CAIA/COMPASS_PROFILE_DATA/` cohort root.
+Set `COMPASS_PATH` to override the default
+`/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/` cohort root.
 Raw clinical text and every pipeline-owned evidence, state, metadata, failure,
 and result artifact are stored as Zstandard-compressed Parquet. JSON remains
 only as the LLM wire format or as a value inside a Parquet audit column.
 The default MRN cohort is
-`$COMPASS_PROFILE_DATA_PATH/mrn_lists/adt_mrns.csv`; externally
+`$COMPASS_PATH/mrn_lists/adt_mrns.csv`; externally
 supplied overrides also use CSV with a `DFCI_MRN` column.
 
 The native PROFILE text rows are consumed exactly as emitted by

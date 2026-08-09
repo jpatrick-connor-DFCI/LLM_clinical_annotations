@@ -54,6 +54,7 @@ FAILURE_COLUMNS = ["DFCI_MRN", "error", "num_snippets"]
 _PRIMARY_LABELS = {"nepc", "avpc", "biomarker", "conventional"}
 _CONFIDENCE_LEVELS = {"high", "medium", "low"}
 _AVPC_CRITERIA = {f"C{index}" for index in range(1, 8)}
+_DEFAULT_OUTPUT_CORRECTION_RETRIES = 2
 BINARY_EXTRACTION_SCHEMA_VERSION = "binary-nepc-grounded-parquet-v4"
 
 
@@ -87,6 +88,16 @@ def parse_args():
     )
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument(
+        "--max-output-correction-retries",
+        type=int,
+        default=_DEFAULT_OUTPUT_CORRECTION_RETRIES,
+        help=(
+            "Additional LLM calls after malformed, inconsistent, ungrounded, or "
+            "truncated output (default: 2). Provider/API retries remain controlled "
+            "by --max-retries."
+        ),
+    )
     parser.add_argument("--limit-mrns", type=int, default=None)
     run_mode = parser.add_mutually_exclusive_group()
     run_mode.add_argument("--overwrite", action="store_true")
@@ -137,7 +148,136 @@ def append_failure(path, mrn, error, num_snippets):
     append_rows_atomic(path, [row], FAILURE_COLUMNS)
 
 
-def classify_patient(provider, client, model, max_retries, mrn, snippets):
+def _list_or_original(value):
+    """Repair the common scalar-for-array model error without hiding other types."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return value
+
+
+def _normalize_model_result(result, snippets):
+    """Apply only deterministic schema repairs before strict validation.
+
+    Clinical assertions are not invented here. Derived fields are recomputed from
+    their detailed fields, and quote dates are repaired only when the exact quote
+    can be grounded in a supplied snippet.
+    """
+    normalized = dict(result)
+    for field in (
+        "biomarker_genes",
+        "avpc_criteria",
+        "non_prostate_primary_types",
+        "supporting_quotes",
+        "supporting_quote_dates",
+    ):
+        normalized[field] = _list_or_original(normalized.get(field))
+
+    genes = normalized.get("biomarker_genes")
+    if isinstance(genes, list):
+        normalized_genes = {
+            str(value).strip().upper() for value in genes if str(value).strip()
+        }
+        normalized["has_biomarker"] = bool(
+            normalized_genes & {"BRCA1", "BRCA2"}
+        )
+        normalized["has_molecular_avpc"] = (
+            len(normalized_genes & {"PTEN", "TP53", "RB1"}) >= 2
+        )
+
+    non_prostate_types = normalized.get("non_prostate_primary_types")
+    if isinstance(non_prostate_types, list):
+        normalized["has_non_prostate_primary"] = bool(non_prostate_types)
+
+    if all(
+        isinstance(normalized.get(field), bool)
+        for field in ("has_nepc", "has_avpc", "has_biomarker")
+    ):
+        normalized["primary_label"] = (
+            "nepc"
+            if normalized["has_nepc"]
+            else "avpc"
+            if normalized["has_avpc"]
+            else "biomarker"
+            if normalized["has_biomarker"]
+            else "conventional"
+        )
+
+    criteria = normalized.get("avpc_criteria")
+    if isinstance(criteria, list):
+        normalized["visceral_met_pattern"] = (
+            "visceral_only" if "C2" in criteria else "none"
+        )
+
+    quotes = normalized.get("supporting_quotes")
+    dates = normalized.get("supporting_quote_dates")
+    if isinstance(quotes, dict):
+        quotes = [quotes]
+        normalized["supporting_quotes"] = quotes
+    # Dates can be reconstructed without inference when every exact quote is
+    # grounded, so allow a missing/null date collection to start empty.
+    if isinstance(quotes, list) and dates is None:
+        dates = []
+        normalized["supporting_quote_dates"] = dates
+    if not isinstance(quotes, list) or not isinstance(dates, list):
+        return normalized
+
+    normalized_quotes = []
+    normalized_dates = []
+    for index, item in enumerate(quotes):
+        inline_date = None
+        if isinstance(item, dict):
+            inline_date = item.get("note_date") or item.get("date")
+            item = (
+                item.get("quote")
+                or item.get("text")
+                or item.get("supporting_quote")
+            )
+        claimed_date = dates[index] if index < len(dates) else inline_date
+        if isinstance(item, str) and item.strip():
+            support = find_quote_support(item, snippets, claimed_date=claimed_date)
+            if support is None:
+                # A verbatim quote paired with the wrong date is still safely
+                # repairable because its actual source date comes from evidence.
+                support = find_quote_support(item, snippets)
+            if support is not None:
+                claimed_date = support.get("note_date")
+        normalized_quotes.append(item)
+        normalized_dates.append(claimed_date)
+    normalized["supporting_quotes"] = normalized_quotes
+    normalized["supporting_quote_dates"] = normalized_dates
+    return normalized
+
+
+def _output_correction_message(error):
+    return f"""
+Your previous answer failed machine validation with: {error}
+
+Re-read the original patient payload and return one corrected JSON object only.
+- All five collection fields must be JSON arrays, even when empty or containing one item.
+- Derive primary_label strictly from has_nepc, then has_avpc, then has_biomarker.
+- has_biomarker must equal whether biomarker_genes contains BRCA1 or BRCA2.
+- has_molecular_avpc must equal whether biomarker_genes contains at least two of PTEN, TP53, RB1.
+- supporting_quotes and supporting_quote_dates must be parallel arrays of equal length.
+- Every quote must be a short, exact, contiguous substring copied from one supplied note_text,
+  and its date must exactly equal that note's note_date. Never paraphrase or splice passages.
+- Stay concise: use at most 8 quotes and omit redundant evidence.
+""".strip()
+
+
+def classify_patient(
+    provider,
+    client,
+    model,
+    max_retries,
+    mrn,
+    snippets,
+    max_output_correction_retries=_DEFAULT_OUTPUT_CORRECTION_RETRIES,
+):
     payload = {
         "patient_mrn": int(mrn),
         "notes": [
@@ -154,16 +294,39 @@ def classify_patient(provider, client, model, max_retries, mrn, snippets):
         {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
-    response_text, error = provider.call_with_retry(client, model, messages, max_retries)
-    if error:
-        return None, error
-    try:
-        result = parse_json_response(response_text)
-    except json.JSONDecodeError as exc:
-        return None, f"json_parse: {exc}"
-    if not isinstance(result, dict):
-        return None, f"non_dict_response: {type(result).__name__}"
-    return validate_result(result, snippets)
+    correction_retries = max(0, int(max_output_correction_retries))
+    last_error = None
+    for output_attempt in range(correction_retries + 1):
+        attempt_messages = messages
+        if last_error is not None:
+            attempt_messages = messages + [
+                {"role": "user", "content": _output_correction_message(last_error)}
+            ]
+        response_text, error = provider.call_with_retry(
+            client, model, attempt_messages, max_retries
+        )
+        if error:
+            last_error = error
+            # Provider adapters have already exhausted transport retries. Only
+            # output truncation benefits from a new, explicitly shorter answer.
+            if not error.startswith("truncated_response"):
+                return None, error
+        else:
+            try:
+                result = parse_json_response(response_text)
+            except json.JSONDecodeError as exc:
+                last_error = f"json_parse: {exc}"
+            else:
+                if not isinstance(result, dict):
+                    last_error = f"non_dict_response: {type(result).__name__}"
+                else:
+                    normalized = _normalize_model_result(result, snippets)
+                    validated, last_error = validate_result(normalized, snippets)
+                    if last_error is None:
+                        return validated, None
+        if output_attempt == correction_retries:
+            break
+    return None, last_error or "no_result"
 
 
 def validate_result(result, snippets):
@@ -450,7 +613,19 @@ def run(args):
 
     def worker(mrn):
         snippets = patient_snippets[mrn]
-        result, error = classify_patient(provider, client, model, args.max_retries, mrn, snippets)
+        result, error = classify_patient(
+            provider,
+            client,
+            model,
+            args.max_retries,
+            mrn,
+            snippets,
+            getattr(
+                args,
+                "max_output_correction_retries",
+                _DEFAULT_OUTPUT_CORRECTION_RETRIES,
+            ),
+        )
         return mrn, snippets, result, error
 
     with ThreadPoolExecutor(max_workers=args.max_workers) as executor:

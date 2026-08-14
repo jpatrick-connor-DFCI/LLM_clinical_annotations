@@ -90,6 +90,11 @@ The longitudinal AVPC/NEPC runner uses a map/reduce extraction:
 3. A patient-level synthesis combines all chunk maps so composite Aparicio
    criteria can use facts documented in different notes/chunks.
 
+The final timeline is cohort-complete when the MRN cohort is available. Patients
+with no validated AVPC/NEPC criteria receive an undated `conventional` sentinel
+row with zero cumulative criteria. Patients with failed or incomplete extraction
+are not auto-labeled conventional.
+
 Resume state is bound to the evidence content, provider, model, prompt text,
 and output schema. If any of these change, rerun stage 1 and/or stage 2 with
 `--overwrite` as instructed by the CLI rather than mixing incompatible runs.
@@ -105,6 +110,10 @@ python tasks/longitudinal_NEPC/build_nepc_timeline.py \
     --output-dir /path/to/avpc_nepc \
     --provider vertex_ai
 ```
+
+To regenerate the timeline after output-format changes without any LLM calls or
+failure retries, use `build_nepc_timeline.py --rebuild-timeline-only` with the
+same output directory, provider/model, and MRN cohort settings as the saved run.
 
 ## Setup
 

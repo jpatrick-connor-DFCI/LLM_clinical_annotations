@@ -226,6 +226,22 @@ def run(args):
                 "Existing evidence content does not match its metadata sidecar. "
                 "Re-run with --overwrite to rebuild evidence and downstream state."
             )
+        # The trigger-bearing evidence can be reused when only no-trigger
+        # cohort membership changes, but keep the denominator itself current
+        # so the timeline can materialize those patients as conventional.
+        current_cohort = (
+            sorted(selected_mrns) if selected_mrns is not None else None
+        )
+        if existing_meta.get("cohort_mrns") != current_cohort:
+            refreshed_meta = dict(existing_meta)
+            refreshed_meta.pop("scan_config", None)
+            refreshed_meta.update(
+                cohort_mrn_count=(
+                    len(selected_mrns) if selected_mrns is not None else None
+                ),
+                cohort_mrns=current_cohort,
+            )
+            write_scan_config_meta(meta_path, scan_config, **refreshed_meta)
         print(f"Existing evidence matches current scan settings, reusing: {evidence_path}")
         progress.update(2)
         progress.close()
@@ -272,6 +288,10 @@ def run(args):
         evidence_sha256=file_sha256(evidence_path),
         evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
         cohort_mrn_count=len(selected_mrns) if selected_mrns is not None else None,
+        # Preserve the actual denominator, not only its size, so stage 2 can
+        # materialize explicit auto-conventional rows for cohort patients who
+        # never produced a trigger-bearing evidence chunk.
+        cohort_mrns=sorted(selected_mrns) if selected_mrns is not None else None,
     )
     progress.update(1)
     progress.close()

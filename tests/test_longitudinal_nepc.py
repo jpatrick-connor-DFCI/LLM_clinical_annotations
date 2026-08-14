@@ -519,6 +519,22 @@ def test_same_day_events_share_complete_cumulative_count(tmp_path):
     assert output["num_criteria_to_date"].to_list() == [2, 2]
 
 
+def test_timeline_adds_undated_auto_conventional_cohort_rows(tmp_path):
+    raw = tmp_path / "raw.parquet"
+    timeline = tmp_path / "timeline.parquet"
+    nepc._write_rows_atomic(raw, [], nepc.RAW_COLUMNS)
+
+    assert nepc.build_timeline(raw, timeline, conventional_mrns={123}) == 1
+
+    row = pl.read_parquet(timeline).row(0, named=True)
+    assert row["DFCI_MRN"] == 123
+    assert row["criterion_added"] == "conventional"
+    assert row["event_date"] is None
+    assert row["cumulative_criteria"] == []
+    assert row["num_criteria_to_date"] == 0
+    assert row["modality"] == "automatic"
+
+
 def test_payload_budget_smaller_than_snippet_cap_is_rejected():
     notes = pl.DataFrame(
         {

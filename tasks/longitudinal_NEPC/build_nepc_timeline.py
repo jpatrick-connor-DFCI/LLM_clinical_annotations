@@ -309,6 +309,14 @@ def parse_args():
     parser.add_argument("--max-workers", type=int, default=16)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--limit-patients", type=int, default=None)
+    parser.add_argument(
+        "--rebuild-timeline-only",
+        action="store_true",
+        help=(
+            "Rebuild raw/audit/timeline Parquets only from saved successful "
+            "syntheses; never make an LLM call or retry incomplete patients."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if args.max_workers < 1:
@@ -1139,11 +1147,14 @@ def _prefer_onset(candidate, existing):
     )
 
 
-def build_timeline(raw_path, timeline_path):
+def build_timeline(raw_path, timeline_path, conventional_mrns=None):
+    conventional_mrns = {
+        int(mrn) for mrn in (conventional_mrns or [])
+    }
     if not raw_path.exists() or raw_path.stat().st_size == 0:
-        _write_rows_atomic(timeline_path, [], TIMELINE_COLUMNS)
-        return 0
-    raw = pl.read_parquet(raw_path)
+        raw = pl.DataFrame(schema={column: pl.String for column in RAW_COLUMNS})
+    else:
+        raw = pl.read_parquet(raw_path)
     onsets = {}
     skipped = 0
     for row in raw.iter_rows(named=True):
@@ -1197,8 +1208,79 @@ def build_timeline(raw_path, timeline_path):
                 row["cumulative_criteria"] = sorted(cumulative)
                 row["num_criteria_to_date"] = len(cumulative)
                 output.append(row)
+
+    # A conventional designation is a cohort-level absence-of-evidence label,
+    # not a dated criterion. Keep its temporal fields empty and its cumulative
+    # criterion count at zero so it cannot be mistaken for an AVPC/NEPC event.
+    positive_mrns = set(by_patient)
+    for mrn in sorted(conventional_mrns - positive_mrns):
+        output.append(
+            {
+                "DFCI_MRN": mrn,
+                "event_date": None,
+                "date_source": None,
+                "date_precision": "unknown",
+                "criterion_added": "conventional",
+                "criterion_label": (
+                    "Auto-conventional: no validated AVPC/NEPC criteria"
+                ),
+                "modality": "automatic",
+                "visceral_met_pattern": None,
+                "cumulative_criteria": [],
+                "num_criteria_to_date": 0,
+                "supporting_quote": None,
+                "confidence": None,
+                "source_note_date": None,
+            }
+        )
     _write_rows_atomic(timeline_path, output, TIMELINE_COLUMNS)
     return len(output)
+
+
+def rebuild_final_artifacts(
+    *,
+    processed_path,
+    raw_path,
+    chunk_log_path,
+    rejected_path,
+    timeline_path,
+    run_config,
+    patient_chunks,
+    selected_mrns,
+    evidence_meta,
+    limited_run=False,
+):
+    """Rebuild derived outputs from durable state without invoking a provider."""
+    raw_count = rebuild_raw_from_processed(
+        processed_path, raw_path, run_config, patient_chunks
+    )
+    rejected_count = rebuild_rejected_findings(
+        chunk_log_path, processed_path, rejected_path, run_config
+    )
+    completed_syntheses = _load_completed_syntheses(processed_path, run_config)
+    successful_mrns = set(completed_syntheses)
+    positive_mrns = set()
+    if raw_path.exists() and raw_path.stat().st_size > 0:
+        raw_frame = pl.read_parquet(raw_path)
+        if "DFCI_MRN" in raw_frame.columns:
+            positive_mrns = {
+                mrn
+                for value in raw_frame["DFCI_MRN"].drop_nulls().to_list()
+                if (mrn := _to_exact_int(value)) is not None
+            }
+
+    recorded_cohort = {
+        mrn
+        for value in (evidence_meta.get("cohort_mrns") or [])
+        if (mrn := _to_exact_int(value)) is not None
+    }
+    cohort_mrns = set(selected_mrns) if selected_mrns is not None else recorded_cohort
+    no_trigger_mrns = set() if limited_run else cohort_mrns - set(patient_chunks)
+    conventional_mrns = no_trigger_mrns | (successful_mrns - positive_mrns)
+    timeline_count = build_timeline(
+        raw_path, timeline_path, conventional_mrns=conventional_mrns
+    )
+    return raw_count, rejected_count, timeline_count
 
 
 def _load_patient_chunks(evidence_df):
@@ -1238,6 +1320,11 @@ def run(args):
         raise ValueError("max_retries must be >= 1")
     if args.limit_patients is not None and args.limit_patients < 0:
         raise ValueError("limit_patients must be >= 0")
+    if getattr(args, "rebuild_timeline_only", False) and args.overwrite:
+        raise ValueError(
+            "--rebuild-timeline-only cannot be combined with --overwrite because "
+            "overwrite deletes the saved synthesis state needed for an offline rebuild."
+        )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = args.evidence_path or (args.output_dir / "avpc_nepc_evidence.parquet")
     meta_path = getattr(args, "evidence_meta_path", None) or _meta_path_for_evidence(
@@ -1269,6 +1356,7 @@ def run(args):
     scan_config, run_config = check_resume_config(
         chunk_log_path, meta_path, args.provider, model, evidence_path
     )
+    evidence_meta = read_scan_config_meta(meta_path) or {}
     print(f"Extraction fingerprint: {run_config} ({args.provider}/{model})")
 
     evidence_df = pl.read_parquet(evidence_path)
@@ -1285,6 +1373,25 @@ def run(args):
     ]
     if args.limit_patients is not None:
         target_mrns = target_mrns[: args.limit_patients]
+
+    if getattr(args, "rebuild_timeline_only", False):
+        raw_count, rejected_count, timeline_count = rebuild_final_artifacts(
+            processed_path=processed_path,
+            raw_path=raw_path,
+            chunk_log_path=chunk_log_path,
+            rejected_path=rejected_path,
+            timeline_path=timeline_path,
+            run_config=run_config,
+            patient_chunks=patient_chunks,
+            selected_mrns=selected_mrns,
+            evidence_meta=evidence_meta,
+            limited_run=args.limit_patients is not None,
+        )
+        print("Offline rebuild only: no LLM calls were made.")
+        print(f"Wrote validated raw findings ({raw_count} rows): {raw_path}")
+        print(f"Wrote rejected-finding audit ({rejected_count} rows): {rejected_path}")
+        print(f"Wrote AVPC/NEPC timeline ({timeline_count} rows): {timeline_path}")
+        return
 
     done_chunks = read_done_chunks(chunk_log_path, run_config)
     map_todo = []
@@ -1469,13 +1576,18 @@ def run(args):
         for reason, count in run_rejected.most_common():
             print(f"  {count:>6}  {reason}")
 
-    raw_count = rebuild_raw_from_processed(
-        processed_path, raw_path, run_config, patient_chunks
+    raw_count, rejected_count, timeline_count = rebuild_final_artifacts(
+        processed_path=processed_path,
+        raw_path=raw_path,
+        chunk_log_path=chunk_log_path,
+        rejected_path=rejected_path,
+        timeline_path=timeline_path,
+        run_config=run_config,
+        patient_chunks=patient_chunks,
+        selected_mrns=selected_mrns,
+        evidence_meta=evidence_meta,
+        limited_run=args.limit_patients is not None,
     )
-    rejected_count = rebuild_rejected_findings(
-        chunk_log_path, processed_path, rejected_path, run_config
-    )
-    timeline_count = build_timeline(raw_path, timeline_path)
     print(f"Wrote validated raw findings ({raw_count} rows): {raw_path}")
     print(f"Wrote rejected-finding audit ({rejected_count} rows): {rejected_path}")
     print(f"Wrote AVPC/NEPC timeline ({timeline_count} rows): {timeline_path}")

@@ -26,6 +26,10 @@ python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out -
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
 python tasks/longitudinal_NEPC/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
+# Strict NEPC diagnosis date only (precision-biased variant of the above)
+python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out
+python tasks/nepc_diagnosis/build_nepc_dx_labels.py --output-dir /path/to/out --provider dfci_gpt
+
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
@@ -118,6 +122,21 @@ Every task is split into a **preprocessing** step and a **task runner**:
    key, each chunk row records the evidence `scan_config` hash it was built
    under; a mismatch against the evidence sidecar raises instead of resuming
    onto chunks that no longer mean the same thing.
+
+   `nepc_diagnosis` is the strict-precision variant of `longitudinal_NEPC`,
+   answering only "does the record state an NEPC diagnosis, and when?". It
+   shares the collector, chunking, and resume machinery but differs in four
+   ways: a narrowed trigger set (the `avpc`/`avpc_atomic` families are dropped);
+   a deterministic negation/hedge/assertion gate applied to every grounded quote
+   (`tasks/nepc_diagnosis/veto.py`), which the model cannot override; quote
+   grounding that requires source-date **equality** and rejects a provenance
+   mismatch rather than silently re-dating the finding to another note; and a
+   per-patient adjudication call producing one label row instead of a
+   multi-event timeline. Its run fingerprint includes `VETO_VERSION`, so
+   changing the gate requires `--overwrite` rather than mixing labels
+   adjudicated under two different gates. `nepc_dx_rejected_findings.parquet`
+   records every rejected finding with its reason and is the tuning signal for
+   the gate.
 
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.

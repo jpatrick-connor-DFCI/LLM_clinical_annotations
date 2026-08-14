@@ -189,6 +189,51 @@ def test_veto_keeps_genuine_diagnoses_near_trial_context(quote):
     assert ok, reason
 
 
+@pytest.mark.parametrize(
+    "quote",
+    [
+        # Clinician assertion contexts: for many patients the diagnosis is
+        # recorded only in an oncology progress note (outside pathology, or a
+        # transformation established across visits), so these must qualify.
+        "ASSESSMENT: Metastatic neuroendocrine prostate cancer.",
+        "IMPRESSION: Small cell carcinoma of the prostate.",
+        "Problem list: neuroendocrine prostate carcinoma.",
+        "He has a known diagnosis of small cell prostate cancer.",
+        "68 yo man s/p chemo for small cell prostate carcinoma.",
+        "Dx: neuroendocrine prostate cancer.",
+        # Self-anchoring acronyms: "NEPC" already denotes a carcinoma, so no
+        # separate "carcinoma"/"cancer" word is required.
+        "Patient with t-NEPC on carboplatin/etoposide.",
+        "Assessment: NEPC, on treatment.",
+        "Metastatic NEPC.",
+        "Known SCPC with liver mets.",
+    ],
+)
+def test_veto_accepts_clinician_stated_diagnoses(quote):
+    ok, reason = screen_quote(quote)
+    assert ok, reason
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        # Surveillance/anticipatory wording is a clinical-note idiom, and the
+        # hedge cues must apply to progress notes exactly as to pathology.
+        "We will monitor for NEPC.",
+        "Surveillance for transformation to NEPC.",
+        "Watching for NEPC.",
+        "If he develops NEPC we would consider platinum.",
+        "Will assess for neuroendocrine transformation.",
+        "Concern for progression to NEPC.",
+        "Discussed the risk of transformation to NEPC.",
+    ],
+)
+def test_veto_rejects_clinical_surveillance_wording(quote):
+    ok, reason = screen_quote(quote)
+    assert not ok
+    assert reason.startswith("negated_or_hedged:")
+
+
 def test_veto_rejects_postposed_negation():
     ok, reason = screen_quote(
         "Small cell carcinoma is not present in this specimen."
@@ -207,6 +252,7 @@ def test_prompts_state_the_strict_exclusions():
     assert '"Neuroendocrine features"' in combined
     assert "When in doubt, report nothing." in combined
     assert "eligibility criteria" in combined
+    assert "Pathology reports and clinician progress notes are BOTH" in combined
     assert "NEVER copy the note date into this field" in combined
     assert "Never introduce a quote, a date, or a fact" in combined
 

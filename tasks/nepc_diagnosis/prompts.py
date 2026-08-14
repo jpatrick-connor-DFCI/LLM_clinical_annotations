@@ -9,7 +9,7 @@ stage-2 run fingerprint hashes this value and both prompt texts, so a changed
 prompt forces --overwrite rather than mixing output generations.
 """
 
-PROMPT_SCHEMA_VERSION = "nepc-dx-v2"
+PROMPT_SCHEMA_VERSION = "nepc-dx-v3"
 
 
 QUALIFYING_DEFINITION = """
@@ -49,8 +49,27 @@ A qualifying event is EITHER of these, and nothing else:
   evidence of an NEPC diagnosis -- report the underlying pathology diagnosis if
   one is separately stated, and otherwise report nothing.
 
-Only a pathology diagnosis line or an oncology clinician's stated, established
-diagnosis qualifies. When in doubt, report nothing.
+### Where a qualifying diagnosis may appear
+Pathology reports and clinician progress notes are BOTH acceptable sources, and
+neither outranks the other. For many patients the diagnosis is recorded only in
+an oncology progress note -- because the diagnosing pathology was performed at an
+outside institution, or because the transformation was established over several
+visits. Do not require a pathology report, and do not downgrade a clinician's
+statement for being clinical rather than pathologic.
+
+Qualifying clinical statements include an oncologist's assessment, impression,
+problem list, or oncologic history asserting the diagnosis as established --
+for example "ASSESSMENT: metastatic neuroendocrine prostate cancer", "Problem
+list: small cell carcinoma of the prostate", "he has a known diagnosis of
+NEPC", or "s/p carboplatin/etoposide for small cell prostate carcinoma". Record
+these with `modality: "clinical"`.
+
+The same exclusions apply regardless of source: a clinician's hedged, suspected,
+rule-out, or surveillance wording ("monitoring for transformation to NEPC",
+"concern for possible small cell") does NOT qualify, exactly as it would not in
+a pathology report.
+
+When in doubt, report nothing.
 """.strip()
 
 
@@ -125,10 +144,14 @@ diagnosis, and if so, identify the EARLIEST qualifying statement.
 
 Adjudicate against the definition above, not against the candidate count. Many
 weak candidates do not add up to one qualifying diagnosis; a single unambiguous
-pathology diagnosis line is sufficient. Reject the patient when every candidate
-is negated, hedged, marker-only, "features/differentiation" only, attributable
-to a non-prostate primary, or an isolated mention without a diagnostic
-assertion.
+statement is sufficient, whether it comes from a pathology report or from a
+clinician's progress note. Reject the patient when every candidate is negated,
+hedged, marker-only, "features/differentiation" only, attributable to a
+non-prostate primary, or an isolated mention without a diagnostic assertion.
+
+Do not prefer a pathology candidate over a clinical one when both are
+unambiguous -- select whichever is EARLIEST. A patient whose only qualifying
+evidence is a clinician's stated, established diagnosis is a positive.
 
 ## RULES
 - Use only the supplied candidates. Never introduce a quote, a date, or a fact

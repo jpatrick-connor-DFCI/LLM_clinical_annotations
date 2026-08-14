@@ -12,6 +12,12 @@ below, as does a fourth class found later: clinical-trial eligibility
 boilerplate, which describes an NEPC population the patient is being screened
 against rather than a diagnosis the patient has.
 
+The gate accepts pathology and clinician wording equally -- for many patients
+the diagnosis is recorded only in an oncology progress note. Clinical assertion
+contexts ("Assessment:", "Problem list:", "s/p") anchor a diagnosis just as a
+pathology diagnosis line does, and the disease acronyms are self-anchoring. The
+negation, hedge, and surveillance cues apply identically to both sources.
+
 Bump VETO_VERSION on any change to the patterns or windows. The stage-2 run
 fingerprint hashes it, so a changed gate forces --overwrite instead of silently
 mixing labels adjudicated under two different gates.
@@ -19,7 +25,7 @@ mixing labels adjudicated under two different gates.
 
 import re
 
-VETO_VERSION = "nepc-dx-veto-v2"
+VETO_VERSION = "nepc-dx-veto-v3"
 
 # The disease term whose assertion status is being adjudicated.
 NEPC_TERM = re.compile(
@@ -27,9 +33,28 @@ NEPC_TERM = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Disease acronyms that are self-anchoring: each already denotes a specific
+# carcinoma ("NEPC" = neuroendocrine prostate cancer, "SCPC" = small cell
+# prostate carcinoma), so requiring a separate "carcinoma"/"cancer" word next to
+# them is redundant. Clinicians writing progress notes use the bare acronym
+# constantly ("Assessment: NEPC, on treatment"), and demanding a spelled-out
+# noun would drop those genuine diagnoses. The spelled-out terms ("small cell",
+# "neuroendocrine") are NOT self-anchoring -- they are adjectives that need a
+# noun, which is exactly what separates a diagnosis from "neuroendocrine
+# features".
+SELF_ANCHORING_TERM = re.compile(
+    r"\b(?:t[\s-]?nepc|nepc|scpc|scnc)\b",
+    flags=re.IGNORECASE,
+)
+
 # A diagnostic assertion must appear in the SAME quote. "Positive for
 # synaptophysin", "shows neuroendocrine features", and a bare term mention all
 # fail this check -- exactly the observed false-positive classes.
+#
+# Includes clinical assertion contexts alongside pathology ones: an oncologist's
+# "Assessment:"/"Impression:"/"Problem list:" line states the patient's
+# diagnosis just as authoritatively as a pathology diagnosis line, and for many
+# patients the progress note is where the diagnosis is recorded.
 ASSERTION_ANCHOR = re.compile(
     r"\b(?:diagnos(?:is|es|ed|tic)|dx|final\s+diagnosis|"
     r"pathologic(?:al)?\s+diagnosis|consistent\s+with|compatible\s+with|c/w|"
@@ -37,7 +62,9 @@ ASSERTION_ANCHOR = re.compile(
     r"transform(?:ation|ed)|transdifferentiat\w*|"
     r"proven|confirmed|established|known|"
     r"carcinoma|cancer|malignancy|tumou?r|"
-    r"history\s+of|status\s+post)\b",
+    r"assessment|impression|problem\s+list|active\s+problem|"
+    r"status\s+post|s/p|on\s+treatment\s+for|being\s+treated\s+for|"
+    r"history\s+of)\b",
     flags=re.IGNORECASE,
 )
 
@@ -63,6 +90,8 @@ NEGATION_HEDGE = re.compile(
     r"favor(?:s|ed|ing)?|worrisome|atypical|"
     r"if|should|would|may|might|could|"
     r"screen(?:ing)?|evaluate|assess|work[\s-]?up|"
+    r"monitor(?:ing|ed)?|surveillance|watch(?:ing|ed)?\s+for|"
+    r"develops?|develop(?:ing|ed)|progress(?:es|ion)\s+to|"
     r"repeat|pending|await(?:ing|ed)?|risk\s+of|potential|"
     r"family\s+history|mother|father|brother|sister)\b",
     flags=re.IGNORECASE,
@@ -137,7 +166,12 @@ def screen_quote(quote):
     hits = list(NEPC_TERM.finditer(text))
     if not hits:
         return False, "no_nepc_term"
-    if ASSERTION_ANCHOR.search(text) is None:
+    # A self-anchoring acronym IS the diagnosis; anything else needs a separate
+    # assertion in the same quote.
+    if (
+        SELF_ANCHORING_TERM.search(text) is None
+        and ASSERTION_ANCHOR.search(text) is None
+    ):
         return False, "no_diagnostic_assertion"
     # Every occurrence must be clean: one negated mention anywhere in the quote
     # makes it an unsafe basis for a strict-precision positive.

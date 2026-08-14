@@ -8,7 +8,9 @@ This exists because the recall-biased longitudinal pipeline reported three
 classes of false positive that prompt wording alone did not prevent:
 negated statements read as positive, IHC results reported as a diagnosis, and a
 single isolated term mention treated as a diagnosis. Each maps to one check
-below.
+below, as does a fourth class found later: clinical-trial eligibility
+boilerplate, which describes an NEPC population the patient is being screened
+against rather than a diagnosis the patient has.
 
 Bump VETO_VERSION on any change to the patterns or windows. The stage-2 run
 fingerprint hashes it, so a changed gate forces --overwrite instead of silently
@@ -17,7 +19,7 @@ mixing labels adjudicated under two different gates.
 
 import re
 
-VETO_VERSION = "nepc-dx-veto-v1"
+VETO_VERSION = "nepc-dx-veto-v2"
 
 # The disease term whose assertion status is being adjudicated.
 NEPC_TERM = re.compile(
@@ -87,6 +89,33 @@ NON_PROSTATE_SITE = re.compile(
 )
 SITE_WINDOW_CHARS = 60
 
+# Stock text: clinical-trial eligibility criteria, protocol titles, consent
+# language, and registry/education boilerplate. These describe a POPULATION the
+# patient is being screened against, not a diagnosis the patient has -- and they
+# select for NEPC wording precisely because the trial targets NEPC, so they are a
+# systematic false-positive source rather than a random one. They are also
+# copy-forwarded across many notes, so one boilerplate block inflates a
+# patient's candidate count out of proportion to the real evidence.
+#
+# Scanned on BOTH sides of the term, like NON_PROSTATE_SITE: "inclusion
+# criteria: patients with small cell carcinoma" puts the cue before,
+# "...small cell carcinoma are eligible for enrollment" puts it after.
+#
+# Scoped to a window around the term, NOT the whole quote or the whole note: a
+# pathology diagnosis and a trial discussion routinely appear in the same note,
+# and the diagnosis is often exactly WHY the trial is being discussed. Vetoing
+# on any protocol mention anywhere would discard genuine diagnoses.
+BOILERPLATE = re.compile(
+    r"\b(?:inclusion|exclusion|eligib\w*|ineligible|enroll\w*|"
+    r"protocol|trial|study\s+(?:of|in|population|arm|drug)|"
+    r"phase\s+(?:i{1,3}|1|2|3|iv|4)\b|nct\d*|cohort\s+[a-z0-9]\b|"
+    r"consent(?:ed|ing)?|screening\s+(?:log|criteria)|randomiz\w*|"
+    r"registry|questionnaire|"
+    r"subjects?\s+must|patients?\s+must|candidates?\s+for)\b",
+    flags=re.IGNORECASE,
+)
+BOILERPLATE_WINDOW_CHARS = 100
+
 # Characters of the flattened quote. ~120 chars ~= 20 tokens: long enough to
 # catch "there is no evidence of an underlying ...", short enough that an
 # unrelated earlier clause does not veto a clean assertion later in the quote.
@@ -99,7 +128,8 @@ def screen_quote(quote):
 
     Reasons are stable strings and land in the rejected-findings audit, so the
     reason histogram is the tuning signal for these patterns:
-      ``no_nepc_term`` / ``no_diagnostic_assertion`` / ``negated_or_hedged:<cue>``
+      ``no_nepc_term`` / ``no_diagnostic_assertion`` /
+      ``negated_or_hedged:<cue>`` / ``boilerplate:<cue>``
     """
     text = re.sub(r"\s+", " ", str(quote or "")).strip()
     if not text:
@@ -127,4 +157,14 @@ def screen_quote(quote):
         site = NON_PROSTATE_SITE.search(site_window)
         if site is not None:
             return False, f"negated_or_hedged:{site.group(0).lower()}"
+        # Stock trial/protocol text describes an eligible population, not this
+        # patient's diagnosis. Its own reason prefix keeps it separately
+        # tunable in the rejection histogram.
+        boiler_window = text[
+            max(0, hit.start() - BOILERPLATE_WINDOW_CHARS):
+            hit.end() + BOILERPLATE_WINDOW_CHARS
+        ]
+        boiler = BOILERPLATE.search(boiler_window)
+        if boiler is not None:
+            return False, f"boilerplate:{boiler.group(0).lower()}"
     return True, None

@@ -9,7 +9,7 @@ stage-2 run fingerprint hashes this value and both prompt texts, so a changed
 prompt forces --overwrite rather than mixing output generations.
 """
 
-PROMPT_SCHEMA_VERSION = "nepc-dx-v1"
+PROMPT_SCHEMA_VERSION = "nepc-dx-v2"
 
 
 QUALIFYING_DEFINITION = """
@@ -38,6 +38,16 @@ A qualifying event is EITHER of these, and nothing else:
   bladder, GI, unknown primary), or one in the family history.
 - Discussion of NEPC as a general risk, a possible future event, a clinical
   trial topic, or educational text.
+- Stock/boilerplate text describing a study POPULATION rather than this
+  patient: clinical trial eligibility criteria ("inclusion criteria: patients
+  with small cell carcinoma are eligible", "exclusion criteria: history of
+  neuroendocrine carcinoma"), protocol titles and study descriptions ("a Phase
+  II study of ... in neuroendocrine prostate cancer"), consent forms, cohort
+  definitions, and registry or questionnaire templates. Such text names NEPC
+  because the trial targets NEPC, not because the patient has it. A patient
+  being screened for, consented to, or enrolled on an NEPC trial is NOT
+  evidence of an NEPC diagnosis -- report the underlying pathology diagnosis if
+  one is separately stated, and otherwise report nothing.
 
 Only a pathology diagnosis line or an oncology clinician's stated, established
 diagnosis qualifies. When in doubt, report nothing.

@@ -150,6 +150,45 @@ def test_veto_rejects_quotes_without_a_disease_term(quote):
     assert reason == "no_nepc_term"
 
 
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Inclusion criteria: patients with small cell carcinoma of the prostate are eligible.",
+        "Exclusion criteria: history of small cell neuroendocrine carcinoma.",
+        "This is a Phase II study of patients with neuroendocrine prostate cancer.",
+        "Eligible subjects must have histologically confirmed neuroendocrine carcinoma.",
+        "Patient consented to DFCI 19-002 for small cell prostate cancer.",
+        "Protocol: A study of lurbinectedin in small cell carcinoma.",
+        "Cohort B: neuroendocrine carcinoma of the prostate.",
+        "Enrolling patients with treatment-emergent neuroendocrine prostate cancer.",
+    ],
+)
+def test_veto_rejects_clinical_trial_boilerplate(quote):
+    """Stock trial text describes an eligible population, not this patient.
+
+    It is a systematic false-positive source: an NEPC trial's eligibility block
+    selects for exactly this wording, and it is copy-forwarded across notes.
+    """
+    ok, reason = screen_quote(quote)
+    assert not ok
+    assert reason.startswith("boilerplate:")
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        # Guards against over-vetoing: a real diagnosis is often the REASON a
+        # trial is discussed, and both land in the same note.
+        "FINAL DIAGNOSIS: Small cell carcinoma of the prostate.",
+        "Pathologic diagnosis of small cell carcinoma of the prostate confirmed"
+        " on the biopsy specimen.",
+    ],
+)
+def test_veto_keeps_genuine_diagnoses_near_trial_context(quote):
+    ok, reason = screen_quote(quote)
+    assert ok, reason
+
+
 def test_veto_rejects_postposed_negation():
     ok, reason = screen_quote(
         "Small cell carcinoma is not present in this specimen."
@@ -167,6 +206,7 @@ def test_prompts_state_the_strict_exclusions():
     assert "Immunohistochemistry results alone" in combined
     assert '"Neuroendocrine features"' in combined
     assert "When in doubt, report nothing." in combined
+    assert "eligibility criteria" in combined
     assert "NEVER copy the note date into this field" in combined
     assert "Never introduce a quote, a date, or a fact" in combined
 
@@ -372,7 +412,7 @@ def test_fingerprint_changes_with_model():
 def test_fingerprint_changes_with_veto_version(monkeypatch):
     """Changing the deterministic gate must force --overwrite."""
     before = dx.extraction_run_config("scan-1", "dfci_gpt", "model-a")
-    monkeypatch.setattr(dx, "VETO_VERSION", "nepc-dx-veto-v2")
+    monkeypatch.setattr(dx, "VETO_VERSION", "veto-sentinel-not-a-real-version")
     assert dx.extraction_run_config("scan-1", "dfci_gpt", "model-a") != before
 
 
@@ -548,7 +588,7 @@ def test_resume_and_config_guards(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Provider, model, prompt"):
         dx.run(_args(tmp_path, evidence, model="model-b"))
 
-    monkeypatch.setattr(dx, "VETO_VERSION", "nepc-dx-veto-v2")
+    monkeypatch.setattr(dx, "VETO_VERSION", "veto-sentinel-not-a-real-version")
     with pytest.raises(ValueError, match="Provider, model, prompt"):
         dx.run(args)
 

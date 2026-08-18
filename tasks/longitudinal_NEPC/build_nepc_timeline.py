@@ -49,6 +49,11 @@ from preprocessing.parquet_io import (  # noqa: E402
 )
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
+from tasks.longitudinal_NEPC.history import (  # noqa: E402
+    HISTORY_VERSION,
+    build_history_context,
+    normalize_history_summary,
+)
 from tasks.longitudinal_NEPC.prompts import (  # noqa: E402
     NEPC_SYNTHESIS_PROMPT,
     NEPC_SYSTEM_PROMPT,
@@ -116,6 +121,7 @@ CHUNK_COLUMNS = [
     "scan_config",
     "run_config",
     "result_json",
+    "history_summary",
 ]
 
 PROCESSED_COLUMNS = [
@@ -365,6 +371,13 @@ def _meta_path_for_evidence(evidence_path):
 
 
 def extraction_run_config(scan_config, provider_name, model):
+    """Fingerprint every input that can change a chunk map or synthesis's meaning.
+
+    HISTORY_VERSION is included deliberately: changing how carried patient
+    history is built or presented changes what a chunk can see, so it must
+    force --overwrite rather than mixing chunks produced under two different
+    history contracts.
+    """
     payload = {
         "schema": PROMPT_SCHEMA_VERSION,
         "scan_config": scan_config,
@@ -372,6 +385,13 @@ def extraction_run_config(scan_config, provider_name, model):
         "model": model,
         "map_prompt": NEPC_SYSTEM_PROMPT,
         "synthesis_prompt": NEPC_SYNTHESIS_PROMPT,
+        "safety_context": CLINICAL_SAFETY_CONTEXT,
+        "history": HISTORY_VERSION,
+        "columns": [
+            RAW_COLUMNS,
+            CHUNK_COLUMNS,
+            PROCESSED_COLUMNS,
+        ],
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:20]
@@ -783,6 +803,7 @@ def validate_map_result(result, chunks):
             "evidence_items": normalized_evidence,
             "rejected": dict(rejected),
             "rejected_items": rejected_items,
+            "history_summary": normalize_history_summary(result.get("history_summary")),
         },
         None,
     )
@@ -865,7 +886,7 @@ def _call_json(provider, client, model, max_retries, messages):
         return None, f"json_parse:{exc}"
 
 
-def _extract_chunk(provider, client, model, max_retries, mrn, chunk_index, chunk):
+def _extract_chunk(provider, client, model, max_retries, mrn, chunk_index, chunk, history=None):
     payload = {
         "patient_mrn": int(mrn),
         "chunk_index": int(chunk_index),
@@ -878,6 +899,8 @@ def _extract_chunk(provider, client, model, max_retries, mrn, chunk_index, chunk
             for row in chunk
         ],
     }
+    if history is not None:
+        payload["prior_history"] = history
     messages = [
         {"role": "system", "content": NEPC_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -888,45 +911,108 @@ def _extract_chunk(provider, client, model, max_retries, mrn, chunk_index, chunk
     return validate_map_result(result, {chunk_index: chunk})
 
 
-def extract_patient(provider, client, model, max_retries, mrn, indexed_chunks):
-    """Map outstanding chunks, preserving their original evidence indices."""
+def _chunk_result_row(chunk_index, result, summary, *, retained=False):
+    """Build one chunk-log row from a validated map result."""
+    return {
+        "chunk_index": chunk_index,
+        "num_criteria": len(result["criteria_found"]),
+        "num_evidence_items": len(result["evidence_items"]),
+        "num_dropped": sum(result.get("rejected", {}).values()),
+        "status": "ok_with_rejections" if result.get("rejected") else "ok",
+        "result_json": json.dumps(result, ensure_ascii=False, sort_keys=True),
+        "history_summary": summary,
+        # Popped by run() before the row is persisted; marks a row carried over
+        # from an earlier run so its rejections are not re-tallied as this run's.
+        "_retained": retained,
+    }
+
+
+def extract_patient(
+    provider,
+    client,
+    model,
+    max_retries,
+    mrn,
+    indexed_chunks,
+    *,
+    stored_results=None,
+    stored_summaries=None,
+):
+    """Map outstanding chunks, preserving their original evidence indices.
+
+    Carries a compiling patient history forward across chunks: each chunk sees
+    a deterministic digest of prior chunks' validated findings plus the last
+    LLM-written narrative. A failed chunk leaves `prior`/`narrative` unchanged
+    so the next chunk still receives the last good state.
+
+    `stored_results` / `stored_summaries` are this patient's chunk results from
+    earlier runs under the SAME run_config, keyed by chunk_index. They serve two
+    purposes. Chunks *before* the first outstanding one seed the carried history.
+    Chunks *within* `indexed_chunks` are ones resume is re-running only to keep
+    the forward pass consistent; if such a re-run call fails, we keep the stored
+    result rather than overwriting a good row with a failure and regressing the
+    patient from complete to partial. The retained result was produced under a
+    shorter history than a clean pass would give, which is strictly better than
+    losing it.
+    """
     outputs = []
     chunk_results = []
+    stored_results = dict(stored_results or {})
+    stored_summaries = dict(stored_summaries or {})
+
+    outstanding_indices = {chunk_index for chunk_index, _ in indexed_chunks}
+    prior = {
+        index: result
+        for index, result in stored_results.items()
+        if index not in outstanding_indices
+    }
+    narrative = None
+    for index in sorted(prior):
+        if stored_summaries.get(index):
+            narrative = stored_summaries[index]
+
     for chunk_index, chunk in indexed_chunks:
+        history = build_history_context(prior, narrative)
         result, error = _extract_chunk(
-            provider, client, model, max_retries, mrn, chunk_index, chunk
+            provider, client, model, max_retries, mrn, chunk_index, chunk, history=history
         )
         if error:
+            retained = stored_results.get(chunk_index)
+            if retained is None:
+                chunk_results.append(
+                    {
+                        "chunk_index": chunk_index,
+                        "num_criteria": 0,
+                        "num_evidence_items": 0,
+                        "num_dropped": 0,
+                        "status": error,
+                        "result_json": None,
+                        "history_summary": None,
+                        "_retained": False,
+                    }
+                )
+                continue
+            retained_summary = stored_summaries.get(chunk_index)
+            outputs.append((chunk_index, retained))
+            prior[chunk_index] = retained
+            if retained_summary:
+                narrative = retained_summary
             chunk_results.append(
-                {
-                    "chunk_index": chunk_index,
-                    "num_criteria": 0,
-                    "num_evidence_items": 0,
-                    "num_dropped": 0,
-                    "status": error,
-                    "result_json": None,
-                }
+                _chunk_result_row(chunk_index, retained, retained_summary, retained=True)
             )
             continue
+        summary = result.pop("history_summary", None)
         outputs.append((chunk_index, result))
-        chunk_results.append(
-            {
-                "chunk_index": chunk_index,
-                "num_criteria": len(result["criteria_found"]),
-                "num_evidence_items": len(result["evidence_items"]),
-                "num_dropped": sum(result.get("rejected", {}).values()),
-                "status": (
-                    "ok_with_rejections"
-                    if result.get("rejected")
-                    else "ok"
-                ),
-                "result_json": json.dumps(result, ensure_ascii=False, sort_keys=True),
-            }
-        )
+        prior[chunk_index] = result
+        if summary:
+            narrative = summary
+        chunk_results.append(_chunk_result_row(chunk_index, result, summary))
     return outputs, chunk_results
 
 
-def synthesize_patient(provider, client, model, max_retries, mrn, chunk_outputs, chunks):
+def synthesize_patient(
+    provider, client, model, max_retries, mrn, chunk_outputs, chunks, patient_history=None
+):
     payload = {
         "patient_mrn": int(mrn),
         "chunk_maps": [
@@ -940,6 +1026,8 @@ def synthesize_patient(provider, client, model, max_retries, mrn, chunk_outputs,
             for index, result in sorted(chunk_outputs.items())
         ],
     }
+    if patient_history:
+        payload["patient_history"] = patient_history
     messages = [
         {"role": "system", "content": NEPC_SYNTHESIS_PROMPT + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -983,6 +1071,26 @@ def _load_chunk_statuses(path, run_config):
         if mrn is not None and idx is not None:
             statuses.setdefault(mrn, {})[idx] = row.get("status") or "unknown"
     return statuses
+
+
+def _load_chunk_summaries(path, run_config):
+    summaries = {}
+    if not path.exists() or path.stat().st_size == 0:
+        return summaries
+    log = pl.read_parquet(path)
+    if "history_summary" not in log.columns:
+        return summaries
+    for row in log.iter_rows(named=True):
+        if row.get("status") not in SUCCESS_STATUSES or row.get("run_config") != run_config:
+            continue
+        mrn = _to_exact_int(row.get("DFCI_MRN"))
+        idx = _to_exact_int(row.get("chunk_index"))
+        if mrn is None or idx is None:
+            continue
+        summary = row.get("history_summary")
+        if summary:
+            summaries.setdefault(mrn, {})[idx] = summary
+    return summaries
 
 
 def _load_completed_syntheses(path, run_config):
@@ -1394,19 +1502,38 @@ def run(args):
         return
 
     done_chunks = read_done_chunks(chunk_log_path, run_config)
+    prior_outputs = _load_chunk_outputs(chunk_log_path, run_config)
+    prior_summaries = _load_chunk_summaries(chunk_log_path, run_config)
     map_todo = []
+    rerun_chunk_count = 0
     for mrn in target_mrns:
-        outstanding = [
-            (chunk_index, chunk)
-            for chunk_index, chunk in sorted(patient_chunks[mrn].items())
-            if (mrn, chunk_index) not in done_chunks
-        ]
-        if outstanding:
-            map_todo.append((mrn, outstanding))
+        ordered = sorted(patient_chunks[mrn].items())
+        first_gap = next(
+            (i for i, (chunk_index, _) in enumerate(ordered) if (mrn, chunk_index) not in done_chunks),
+            len(ordered),
+        )
+        outstanding = ordered[first_gap:]
+        if not outstanding:
+            continue
+        already_done = sum(1 for chunk_index, _ in outstanding if (mrn, chunk_index) in done_chunks)
+        rerun_chunk_count += already_done
+        map_todo.append(
+            (
+                mrn,
+                outstanding,
+                prior_outputs.get(mrn, {}),
+                prior_summaries.get(mrn, {}),
+            )
+        )
     print(
         f"Chunk mapping: {len(map_todo)} patients, "
-        f"{sum(len(items) for _, items in map_todo)} outstanding calls"
+        f"{sum(len(items) for _, items, _, _ in map_todo)} outstanding calls"
     )
+    if rerun_chunk_count:
+        print(
+            f"  ({rerun_chunk_count} of those are re-runs of already-completed chunks, "
+            "so the carried history stays one consistent forward pass)"
+        )
 
     # Findings this run's LLM calls produced but validation refused, by reason.
     # Only calls made *this* run contribute; resumed chunks keep their counts in
@@ -1417,16 +1544,25 @@ def run(args):
     if map_todo:
         client = provider.build_client()
 
-        def map_worker(mrn, indexed_chunks):
+        def map_worker(mrn, indexed_chunks, stored_results, stored_summaries):
             outputs, results = extract_patient(
-                provider, client, model, args.max_retries, mrn, indexed_chunks
+                provider,
+                client,
+                model,
+                args.max_retries,
+                mrn,
+                indexed_chunks,
+                stored_results=stored_results,
+                stored_summaries=stored_summaries,
             )
             return mrn, outputs, results
 
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
             futures = {
-                executor.submit(map_worker, mrn, chunks): (mrn, chunks)
-                for mrn, chunks in map_todo
+                executor.submit(
+                    map_worker, mrn, chunks, stored_results, stored_summaries
+                ): (mrn, chunks)
+                for mrn, chunks, stored_results, stored_summaries in map_todo
             }
             for future in tqdm(as_completed(futures), total=len(futures), desc="Map", unit="pt"):
                 mrn, attempted = futures[future]
@@ -1440,10 +1576,14 @@ def run(args):
                             "num_evidence_items": 0,
                             "status": f"worker_error:{type(exc).__name__}:{str(exc)[:160]}",
                             "result_json": None,
+                            "history_summary": None,
+                            "_retained": False,
                         }
                         for index, _ in attempted
                     ]
                 for result in results:
+                    if result.pop("_retained", False):
+                        continue
                     if result.get("result_json"):
                         try:
                             run_rejected.update(
@@ -1468,6 +1608,7 @@ def run(args):
 
     chunk_outputs = _load_chunk_outputs(chunk_log_path, run_config)
     chunk_statuses = _load_chunk_statuses(chunk_log_path, run_config)
+    chunk_summaries = _load_chunk_summaries(chunk_log_path, run_config)
     completed_syntheses = _load_completed_syntheses(processed_path, run_config)
     synthesis_todo = []
     for mrn in target_mrns:
@@ -1511,6 +1652,10 @@ def run(args):
             client = provider.build_client()
 
         def synthesis_worker(mrn):
+            patient_history = None
+            summaries = chunk_summaries.get(mrn)
+            if summaries:
+                patient_history = summaries[max(summaries)]
             result, error = synthesize_patient(
                 provider,
                 client,
@@ -1519,6 +1664,7 @@ def run(args):
                 mrn,
                 chunk_outputs[mrn],
                 patient_chunks[mrn],
+                patient_history=patient_history,
             )
             return mrn, result, error
 

@@ -8,6 +8,10 @@ from preprocessing.config import LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
 from preprocessing.longitudinal import file_sha256, group_patient_snippets, write_scan_config_meta
 from preprocessing.triggers import TRIGGER_REGEX, find_trigger_matches
 from tasks.longitudinal_NEPC import build_nepc_timeline as nepc
+from tasks.longitudinal_NEPC.history import (
+    build_history_context,
+    normalize_history_summary,
+)
 from tasks.longitudinal_NEPC.prompts import (
     NEPC_SYNTHESIS_PROMPT,
     NEPC_SYSTEM_PROMPT,
@@ -758,3 +762,530 @@ def test_dropped_findings_are_counted_in_the_processed_log(tmp_path, monkeypatch
     assert rejected.height == 1
     assert rejected["stage"].to_list() == ["synthesis"]
     assert rejected["reason"].to_list() == ["quote_or_source_not_in_evidence"]
+
+
+def test_history_digest_is_deterministic_and_capped():
+    prior_results = {
+        0: {
+            "criteria_found": [
+                {"criterion": "C5", "diagnosis_date": "2021-06-05"},
+            ],
+            "evidence_items": [
+                {
+                    "candidate_criterion": "C5",
+                    "fact_type": "psa_value",
+                    "fact_value": "PSA 7.2",
+                    "fact_date": "2021-06-01",
+                    "source_note_date": "2021-06-03",
+                    "quote": "PSA was 7.2",
+                },
+                {
+                    "candidate_criterion": "C5",
+                    "fact_type": "psa_value",
+                    "fact_value": "PSA 7.2",
+                    "fact_date": "2021-06-01",
+                    "source_note_date": "2021-06-03",
+                    "quote": "duplicate of the same fact",
+                },
+                {
+                    "candidate_criterion": "C5",
+                    "fact_type": "psa_value",
+                    "fact_value": "PSA 6.9",
+                    "fact_date": "2021-05-01",
+                    "source_note_date": "2021-05-03",
+                    "quote": "earlier PSA",
+                },
+                {
+                    "candidate_criterion": "C5",
+                    "fact_type": "psa_value",
+                    "fact_value": "PSA 8.0",
+                    "fact_date": "2021-07-01",
+                    "source_note_date": "2021-07-03",
+                    "quote": "later PSA",
+                },
+                {
+                    "candidate_criterion": "C5",
+                    "fact_type": "psa_value",
+                    "fact_value": "PSA 9.0",
+                    "fact_date": "2021-08-01",
+                    "source_note_date": "2021-08-03",
+                    "quote": "latest PSA, should be capped out",
+                },
+            ],
+        }
+    }
+    context = build_history_context(prior_results, "narrative so far")
+    assert context["criteria_established"] == [
+        {"criterion": "C5", "diagnosis_date": "2021-06-05"}
+    ]
+    # Group cap: at most MAX_FACTS_PER_GROUP=3 per (criterion, fact_type), earliest first.
+    facts = context["established_facts"]
+    assert len(facts) == 3
+    assert [f["fact_date"] for f in facts] == ["2021-05-01", "2021-06-01", "2021-07-01"]
+    assert all("quote" not in f for f in facts)
+    assert context["narrative"] == "narrative so far"
+
+    # Reordering the input dict/list must not change the digest.
+    reordered_results = {0: dict(prior_results[0])}
+    reordered_results[0]["evidence_items"] = list(
+        reversed(prior_results[0]["evidence_items"])
+    )
+    reordered_context = build_history_context(reordered_results, "narrative so far")
+    assert reordered_context == context
+
+
+def test_history_digest_breaks_date_ties_deterministically():
+    """Facts sharing a fact_date must not be ranked by input order.
+
+    Sorting on the date alone leaves ties to Python's stable sort, which would
+    let the caller's accumulation order decide which facts survive the caps.
+    """
+
+    def fact(value):
+        return {
+            "candidate_criterion": "C5",
+            "fact_type": "psa_value",
+            "fact_value": value,
+            "fact_date": "2021-06-01",
+            "source_note_date": "2021-06-03",
+        }
+
+    items = [fact("PSA 7.2"), fact("PSA 3.1"), fact("PSA 9.9"), fact("PSA 1.4")]
+    forward = build_history_context({0: {"criteria_found": [], "evidence_items": items}}, None)
+    reversed_ = build_history_context(
+        {0: {"criteria_found": [], "evidence_items": list(reversed(items))}}, None
+    )
+    assert forward == reversed_
+    # The surviving *set* is stable, not merely the ordering.
+    assert [f["fact_value"] for f in forward["established_facts"]] == [
+        "PSA 1.4",
+        "PSA 3.1",
+        "PSA 7.2",
+    ]
+
+    # Splitting the same facts across chunks in a different order is also stable.
+    split = build_history_context(
+        {
+            2: {"criteria_found": [], "evidence_items": [items[2], items[3]]},
+            0: {"criteria_found": [], "evidence_items": [items[0], items[1]]},
+        },
+        None,
+    )
+    assert split == forward
+
+
+def test_history_digest_is_omitted_when_prior_chunks_established_nothing():
+    empty = {0: {"criteria_found": [], "evidence_items": []}}
+    assert build_history_context(empty, None) is None
+    # A narrative alone is still real information and must survive.
+    assert build_history_context(empty, "a narrative")["narrative"] == "a narrative"
+
+
+def test_failed_rerun_keeps_the_stored_chunk_result():
+    """A resume must never overwrite a good chunk row with a transient failure.
+
+    Re-run-from-first-gap re-calls chunks that already succeeded. If such a call
+    fails, keeping the stored result is what stops a complete patient from
+    regressing to partial_map and dropping off the timeline.
+    """
+    chunks = _chunks()  # indices 0 and 2
+    stored_result = {
+        "criteria_found": [],
+        "evidence_items": [
+            {
+                "candidate_criterion": "C5",
+                "fact_type": "bone_metastasis_count",
+                "fact_value": "24",
+                "fact_date": None,
+                "source_note_date": "2021-06-05",
+                "modality": "imaging",
+                "quote": "Bone scan demonstrates at least 24 osseous metastases.",
+                "confidence": "high",
+            }
+        ],
+        "rejected": {},
+        "rejected_items": [],
+    }
+
+    class Provider:
+        def __init__(self):
+            self.payloads = []
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            payload = json.loads(messages[1]["content"])
+            self.payloads.append(payload)
+            if payload["chunk_index"] == 2:
+                return None, "rate_limit: quota exceeded"
+            return json.dumps(
+                {
+                    "criteria_found": [],
+                    "evidence_items": [],
+                    "history_summary": "chunk 0 summary",
+                }
+            ), None
+
+    provider = Provider()
+    outputs, results = nepc.extract_patient(
+        provider,
+        object(),
+        "model",
+        1,
+        123,
+        sorted(chunks.items()),
+        stored_results={2: stored_result},
+        stored_summaries={2: "stored chunk 2 summary"},
+    )
+
+    retained = results[1]
+    assert retained["chunk_index"] == 2
+    assert retained["status"] == "ok"
+    assert retained["_retained"] is True
+    assert retained["history_summary"] == "stored chunk 2 summary"
+    assert json.loads(retained["result_json"]) == stored_result
+    assert retained["num_evidence_items"] == 1
+    # The chunk still counts as mapped, so the patient stays synthesizable.
+    assert dict(outputs)[2] == stored_result
+
+
+def test_failed_rerun_without_a_stored_result_still_fails():
+    chunks = _chunks()
+
+    class Provider:
+        def call_with_retry(self, client, model, messages, max_retries):
+            return None, "rate_limit: quota exceeded"
+
+    outputs, results = nepc.extract_patient(
+        Provider(), object(), "model", 1, 123, sorted(chunks.items())
+    )
+    assert outputs == []
+    assert [r["status"] for r in results] == [
+        "rate_limit: quota exceeded",
+        "rate_limit: quota exceeded",
+    ]
+    assert all(r["_retained"] is False for r in results)
+
+
+def test_history_digest_returns_none_for_first_chunk():
+    assert build_history_context({}, None) is None
+    assert build_history_context(None, None) is None
+
+
+def test_history_summary_is_normalized_and_capped():
+    assert normalize_history_summary(None) is None
+    assert normalize_history_summary(123) is None
+    assert normalize_history_summary("") is None
+    assert normalize_history_summary("   ") is None
+    assert normalize_history_summary("a\n\tb   c") == "a b c"
+    long_text = "word " * 1000
+    normalized = normalize_history_summary(long_text)
+    assert len(normalized) <= 2000
+    assert not normalized.endswith(" ")
+
+
+def test_prior_history_is_passed_to_later_chunks():
+    chunks = _chunks()
+
+    class Provider:
+        def __init__(self):
+            self.payloads = []
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            payload = json.loads(messages[1]["content"])
+            self.payloads.append(payload)
+            chunk_index = payload["chunk_index"]
+            note = payload["notes"][0]
+            if chunk_index == 0:
+                return json.dumps(
+                    {
+                        "criteria_found": [],
+                        "evidence_items": [
+                            {
+                                "candidate_criterion": "C5",
+                                "fact_type": "psa_value",
+                                "fact_value": "7.2 ng/mL",
+                                "fact_date": None,
+                                "source_note_date": note["note_date"],
+                                "modality": "labs",
+                                "quote": note["note_text"],
+                                "confidence": "high",
+                            }
+                        ],
+                        "history_summary": "PSA 7.2 documented at progression.",
+                    }
+                ), None
+            return json.dumps(
+                {
+                    "criteria_found": [],
+                    "evidence_items": [],
+                    "history_summary": "Bone mets also seen.",
+                }
+            ), None
+
+    provider = Provider()
+    indexed_chunks = sorted(chunks.items())
+    outputs, results = nepc.extract_patient(
+        provider, object(), "model", 1, 123, indexed_chunks
+    )
+    assert "prior_history" not in provider.payloads[0]
+    assert provider.payloads[1]["prior_history"]["narrative"] == (
+        "PSA 7.2 documented at progression."
+    )
+    assert provider.payloads[1]["prior_history"]["established_facts"][0][
+        "fact_value"
+    ] == "7.2 ng/mL"
+    assert results[0]["history_summary"] == "PSA 7.2 documented at progression."
+    assert results[1]["history_summary"] == "Bone mets also seen."
+    # result_json shape is unchanged -- the narrative lives only in the column.
+    assert "history_summary" not in json.loads(results[0]["result_json"])
+
+
+def test_quote_from_prior_history_is_not_grounded():
+    """Regression test for the core safety property: prior_history cannot ground a quote."""
+    chunks = {
+        0: [
+            {
+                "note_date": "2021-06-03",
+                "note_type": "Labs",
+                "snippet": "At progression PSA was 7.2 ng/mL.",
+            }
+        ]
+    }
+    result = {
+        "criteria_found": [
+            _finding(
+                "C5",
+                "Bone scan demonstrates at least 24 osseous metastases.",
+                "2021-06-03",
+                "2021-06-03",
+            )
+        ],
+        "evidence_items": [],
+    }
+    normalized, error = nepc.validate_map_result(result, chunks)
+    assert error is None
+    assert normalized["criteria_found"] == []
+    assert normalized["rejected"] == {"quote_or_source_not_in_evidence": 1}
+
+
+def test_failed_chunk_carries_last_good_history():
+    chunks = {
+        0: [
+            {
+                "note_date": "2021-06-03",
+                "note_type": "Labs",
+                "snippet": "At progression PSA was 7.2 ng/mL.",
+            }
+        ],
+        1: [
+            {
+                "note_date": "2021-06-04",
+                "note_type": "Clinical",
+                "snippet": "Follow-up visit note.",
+            }
+        ],
+        2: [
+            {
+                "note_date": "2021-06-05",
+                "note_type": "Imaging",
+                "snippet": "Bone scan demonstrates at least 24 osseous metastases.",
+            }
+        ],
+    }
+
+    class Provider:
+        def __init__(self):
+            self.payloads = []
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            payload = json.loads(messages[1]["content"])
+            self.payloads.append(payload)
+            chunk_index = payload["chunk_index"]
+            note = payload["notes"][0]
+            if chunk_index == 0:
+                return json.dumps(
+                    {
+                        "criteria_found": [],
+                        "evidence_items": [
+                            {
+                                "candidate_criterion": "C5",
+                                "fact_type": "psa_value",
+                                "fact_value": "7.2 ng/mL",
+                                "fact_date": None,
+                                "source_note_date": note["note_date"],
+                                "modality": "labs",
+                                "quote": note["note_text"],
+                                "confidence": "high",
+                            }
+                        ],
+                        "history_summary": "PSA 7.2 documented.",
+                    }
+                ), None
+            if chunk_index == 1:
+                return "not json", None
+            return json.dumps({"criteria_found": [], "evidence_items": []}), None
+
+    provider = Provider()
+    indexed_chunks = sorted(chunks.items())
+    outputs, results = nepc.extract_patient(
+        provider, object(), "model", 1, 123, indexed_chunks
+    )
+    assert results[1]["status"].startswith("json_parse")
+    assert results[1]["history_summary"] is None
+    # Chunk 2 still receives chunk 0's history since chunk 1 failed.
+    assert provider.payloads[2]["prior_history"]["narrative"] == "PSA 7.2 documented."
+
+
+def test_resume_reruns_every_chunk_after_the_first_gap(tmp_path, monkeypatch):
+    evidence = tmp_path / "avpc_nepc_evidence.parquet"
+    meta = tmp_path / "avpc_nepc_evidence.meta.parquet"
+    pl.DataFrame(
+        {
+            "DFCI_MRN": [123, 123],
+            "chunk_index": [0, 2],
+            "note_date": ["2021-06-03", "2021-06-05"],
+            "note_type": ["Labs", "Imaging"],
+            "snippet": [
+                "At progression PSA was 7.2 ng/mL.",
+                "Bone scan demonstrates at least 24 osseous metastases.",
+            ],
+        }
+    ).write_parquet(evidence)
+    write_scan_config_meta(
+        meta,
+        "scan-1",
+        evidence_sha256=file_sha256(evidence),
+        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+    )
+
+    class Provider:
+        default_model = "model-a"
+
+        def __init__(self):
+            self.calls = 0
+            self.map_calls = 0
+
+        def build_client(self):
+            return object()
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            self.calls += 1
+            payload = json.loads(messages[1]["content"])
+            if "chunk_maps" in payload:
+                return json.dumps(
+                    {
+                        "criteria_found": [
+                            {
+                                "criterion": "C5",
+                                "diagnosis_date": "2021-06-05",
+                                "source_note_date": "2021-06-05",
+                                "modality": "imaging",
+                                "visceral_met_pattern": "none",
+                                "quote": "Bone scan demonstrates at least 24 osseous metastases.",
+                                "confidence": "high",
+                            }
+                        ]
+                    }
+                ), None
+            self.map_calls += 1
+            note = payload["notes"][0]
+            if payload["chunk_index"] == 0:
+                item = {
+                    "candidate_criterion": "C5",
+                    "fact_type": "psa_value",
+                    "fact_value": "7.2 ng/mL",
+                    "fact_date": None,
+                    "source_note_date": note["note_date"],
+                    "modality": "labs",
+                    "quote": note["note_text"],
+                    "confidence": "high",
+                }
+            else:
+                item = {
+                    "candidate_criterion": "C5",
+                    "fact_type": "bone_metastasis_count",
+                    "fact_value": "24",
+                    "fact_date": None,
+                    "source_note_date": note["note_date"],
+                    "modality": "imaging",
+                    "quote": note["note_text"],
+                    "confidence": "high",
+                }
+            return json.dumps(
+                {
+                    "criteria_found": [],
+                    "evidence_items": [item],
+                    "history_summary": f"chunk {payload['chunk_index']} summary",
+                }
+            ), None
+
+    provider = Provider()
+    monkeypatch.setattr(nepc, "get_provider", lambda name: provider)
+
+    args = Namespace(
+        output_dir=tmp_path,
+        evidence_path=evidence,
+        evidence_meta_path=None,
+        mrn_file=None,
+        mrns=None,
+        provider="vertex_ai",
+        model=None,
+        max_workers=1,
+        max_retries=1,
+        limit_patients=None,
+        overwrite=False,
+    )
+    nepc.run(args)
+    assert provider.map_calls == 2
+
+    # Force chunk 0 to look outstanding again by deleting its row while keeping chunk 2.
+    chunk_log_path = tmp_path / "avpc_nepc_processed_chunks.parquet"
+    log = pl.read_parquet(chunk_log_path)
+    log.filter(pl.col("chunk_index") != 0).write_parquet(chunk_log_path)
+    processed_path = tmp_path / "avpc_nepc_processed_patients.parquet"
+    processed_path.unlink(missing_ok=True)
+
+    provider.map_calls = 0
+    nepc.run(args)
+    # Re-run-from-first-gap: chunk 0 is outstanding, so chunk 2 (later) reruns too.
+    assert provider.map_calls == 2
+
+
+def test_non_contiguous_indices_thread_history_correctly():
+    chunks = _chunks()  # indices 0 and 2
+
+    class Provider:
+        def __init__(self):
+            self.payloads = []
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            payload = json.loads(messages[1]["content"])
+            self.payloads.append(payload)
+            note = payload["notes"][0]
+            return json.dumps(
+                {
+                    "criteria_found": [],
+                    "evidence_items": [
+                        {
+                            "candidate_criterion": "C5",
+                            "fact_type": "psa_value",
+                            "fact_value": "7.2 ng/mL",
+                            "fact_date": None,
+                            "source_note_date": note["note_date"],
+                            "modality": "labs",
+                            "quote": note["note_text"],
+                            "confidence": "high",
+                        }
+                    ],
+                    "history_summary": f"summary after chunk {payload['chunk_index']}",
+                }
+            ), None
+
+    provider = Provider()
+    indexed_chunks = sorted(chunks.items())
+    assert [idx for idx, _ in indexed_chunks] == [0, 2]
+    outputs, results = nepc.extract_patient(
+        provider, object(), "model", 1, 123, indexed_chunks
+    )
+    assert "prior_history" not in provider.payloads[0]
+    assert provider.payloads[1]["chunk_index"] == 2
+    assert provider.payloads[1]["prior_history"]["narrative"] == "summary after chunk 0"

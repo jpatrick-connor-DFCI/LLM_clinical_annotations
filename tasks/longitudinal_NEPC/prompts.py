@@ -3,7 +3,7 @@
 
 # Bump this whenever either prompt's semantics or output contract changes. The
 # stage-2 run fingerprint includes both this value and the complete prompt text.
-PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v5"
+PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v6"
 
 
 CANONICAL_CRITERIA = """
@@ -45,9 +45,45 @@ single patient's de-identified note snippets.
 
 {CANONICAL_CRITERIA}
 
+## INPUT
+The payload may include an optional `prior_history` object summarizing
+*earlier chunks for this same patient*:
+- `criteria_established`: canonical criteria already confirmed by earlier
+  chunks, with their earliest known diagnosis date.
+- `established_facts`: atomic facts (candidate_criterion, fact_type,
+  fact_value, fact_date, source_note_date) already documented by earlier
+  chunks.
+- `narrative`: a short prose summary of the patient's disease-state timeline
+  so far (diagnosis, ADT start, CRPC progression, metastatic sites with
+  dates) and which criteria remain open.
+
+Chunks are ordered chronologically by note date, but snippets with no stated
+date sort last, so `prior_history` is only approximately -- not strictly --
+earlier in time than this chunk.
+
+**Hard rule:** `prior_history` is context only. Every quote in
+`criteria_found` and `evidence_items` must be verbatim from **this chunk's**
+`notes`. Never quote from `prior_history`; never re-emit a fact already listed
+in `established_facts` unless this chunk independently documents it.
+
+**Enabling rule:** if `prior_history` documents one component of a composite
+criterion -- C5 and C7 most often -- and this chunk documents the remaining
+component, you may report that criterion in `criteria_found`. The `quote` and
+`source_note_date` must identify the completing fact from this chunk, not from
+`prior_history`. This rule overrides the "this chunk alone" phrasing anywhere
+else in these instructions.
+
+C2 is the exception: `prior_history` can only ever DEFEAT C2, never complete
+it. Bone or other non-visceral disease recorded in `prior_history` defeats
+exclusivity even when this chunk shows only visceral disease; the absence of
+bone disease in `prior_history` never establishes exclusivity.
+
 ## TASK
-1. Report a criterion in `criteria_found` only when this chunk alone contains
-   all evidence required by its canonical definition.
+1. Report a criterion in `criteria_found` when its canonical definition is
+   fully satisfied -- either by this chunk alone, or by this chunk together
+   with `prior_history` under the enabling rule above. The fact that completes
+   the criterion must come from this chunk, and `quote` / `source_note_date`
+   must identify that completing fact.
 2. Report only criterion-determining atomic facts in `evidence_items`, even when
    the chunk does not contain enough information to establish the full criterion.
    These compact items will be combined with other chunks in a patient-level
@@ -96,10 +132,11 @@ single patient's de-identified note snippets.
   `fact_type`; do not use a nearby quote that supports only a different fact.
 - modality: "pathology" | "imaging" | "clinical" | "labs".
 - confidence: "high" | "medium" | "low".
-- Report C2 in `criteria_found` only when this chunk establishes EXCLUSIVELY
-  visceral disease, and set `visceral_met_pattern` to "visceral_only". If
-  visceral metastases are documented but exclusivity is not established (or
-  concurrent bone/non-visceral disease is present), do NOT report C2 as a
+- Report C2 in `criteria_found` only when EXCLUSIVELY visceral disease is
+  established, and set `visceral_met_pattern` to "visceral_only". Concurrent
+  bone or other non-visceral disease defeats exclusivity whether it is
+  documented in this chunk or in `prior_history`. If visceral metastases are
+  documented but exclusivity is not established, do NOT report C2 as a
   criterion -- record the metastatic sites as `evidence_items` instead and let
   the synthesis stage decide. Use "none" for every non-C2 criterion.
 
@@ -128,9 +165,16 @@ Return only valid JSON:
       "quote": "<verbatim>",
       "confidence": "high"
     }}
-  ]
+  ],
+  "history_summary": "<plain prose, at most 2000 characters>"
 }}
 Use empty arrays when nothing relevant is documented.
+
+`history_summary` updates the prior narrative with what this chunk adds:
+disease-state timeline (diagnosis, ADT start, CRPC progression, metastatic
+sites with dates), which criteria are now established, and what is still
+missing to close a partially-supported one. No speculation, and do not
+restate `established_facts` verbatim -- write a short prose update.
 """.strip()
 
 
@@ -145,6 +189,12 @@ for one prostate-cancer patient.
 Combine facts across chunks and return every canonical AVPC criterion and NEPC
 sub-feature documented as present. Report each criterion once, using its
 earliest supportable occurrence.
+
+The payload may include an optional `patient_history` string: the final
+carried narrative written across the patient's chunks, offered as advisory
+context on the disease-state timeline. It is not evidence -- every criterion
+you report must still be grounded in the mapped `chunk_maps` evidence below,
+under the same rules as always.
 
 ## RULES
 - Use only the mapped evidence. Never infer missing thresholds, dates,

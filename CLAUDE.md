@@ -115,13 +115,24 @@ Every task is split into a **preprocessing** step and a **task runner**:
    `--overwrite` instead of silently mixing output generations.
 
    The two longitudinal timeline builders resume at **chunk** granularity via
-   `avpc_nepc_processed_chunks.parquet` / `gleason_processed_chunks.parquet`: a patient
-   whose chunk 2 failed re-runs only chunk 2, keeping the findings the other
-   chunks already produced, and per-patient status is derived as
-   `ok` / `partial:N/M` / `failed:<err>`. Because `chunk_index` is the resume
-   key, each chunk row records the evidence `scan_config` hash it was built
-   under; a mismatch against the evidence sidecar raises instead of resuming
-   onto chunks that no longer mean the same thing.
+   `avpc_nepc_processed_chunks.parquet` / `gleason_processed_chunks.parquet`, but
+   they differ in how far a gap propagates. `gleason_score` resumes strictly per
+   chunk: a patient whose chunk 2 failed re-runs only chunk 2, keeping the
+   findings the other chunks already produced. `longitudinal_NEPC` instead
+   compiles a patient history forward across its map calls — each chunk sees a
+   deterministic digest of prior chunks' validated findings plus a short
+   LLM-written narrative (`tasks/longitudinal_NEPC/history.py`), so grounding
+   still only accepts quotes from that chunk's own notes. Because that history
+   depends on a consistent forward pass, its resume re-runs from the **first**
+   outstanding chunk of a patient onward, not just the gap: a patient whose
+   chunk 2 failed re-runs chunks 2 and every later chunk. Both runners derive
+   per-patient status as `ok` / `partial:N/M` / `failed:<err>`, and both record
+   the evidence `scan_config` hash on each chunk row; a mismatch against the
+   evidence sidecar raises instead of resuming onto chunks that no longer mean
+   the same thing. `longitudinal_NEPC`'s run fingerprint also includes
+   `HISTORY_VERSION`, so changing how carried history is built or presented
+   forces `--overwrite` rather than mixing chunks produced under two different
+   history contracts.
 
    `nepc_diagnosis` is the strict-precision variant of `longitudinal_NEPC`,
    answering only "does the record state an NEPC diagnosis, and when?". It

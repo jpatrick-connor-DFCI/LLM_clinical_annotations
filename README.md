@@ -1,7 +1,8 @@
 # LLM clinical annotations
 
 LLM-based extraction of structured clinical annotations (NEPC status, pan-cancer
-stage, Gleason score, AVPC/NEPC criteria timelines) from merged PROFILE_DATA
+stage, Gleason score, AVPC/NEPC criteria timelines, metastatic disease status and
+date) from merged PROFILE_DATA
 clinical-note parquets, runnable against either DFCI Azure OpenAI or Google
 Vertex AI (Gemini) as the LLM backend.
 
@@ -27,6 +28,8 @@ tasks/              One directory per extraction task, each with a system
   cancer_stage/      Cancer stage timeline extraction.
   gleason_score/     Gleason score / grade group timeline extraction.
   longitudinal_NEPC/ AVPC (Aparicio criteria) / NEPC feature timeline extraction.
+  nepc_diagnosis/    Strict NEPC diagnosis label + date (precision-biased).
+  met_diagnosis/     Metastatic prostate cancer label + first-mention date.
 
 notebooks/          One notebook per task with a PROVIDER toggle. Each notebook
                     subprocess-calls the preprocessing CLIs, then the task's

@@ -114,6 +114,7 @@ SNIPPET_GAP_CHARS = 300
 GLEASON_EVIDENCE_SCHEMA_VERSION = "gleason-evidence-parquet-v3"
 LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION = "avpc-nepc-evidence-parquet-v3"
 NEPC_DX_EVIDENCE_SCHEMA_VERSION = "nepc-dx-evidence-parquet-v1"
+MET_DX_EVIDENCE_SCHEMA_VERSION = "met-dx-evidence-parquet-v1"
 
 
 @dataclass(frozen=True)

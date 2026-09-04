@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from preprocessing.cli.collect_gleason_notes import run as collect_gleason
+from preprocessing.cli.collect_met_dx_notes import run as collect_met_dx
 from preprocessing.cli.collect_nepc_notes import run as collect_nepc
 from preprocessing.cli.compile_patient_snippets import run as compile_snippets
 from preprocessing.bundles.snippet_bundle import (
@@ -70,7 +71,7 @@ def test_binary_avpc_prompt_uses_the_canonical_c2_contract():
     assert "visceral_and_bone" not in CLASSIFY_SYSTEM_PROMPT
 
 
-@pytest.mark.parametrize("collector", ["binary", "gleason", "nepc"])
+@pytest.mark.parametrize("collector", ["binary", "gleason", "nepc", "met_dx"])
 def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collector):
     common = {
         "output_dir": tmp_path,
@@ -97,7 +98,7 @@ def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collec
             scan_workers=1,
         )
         target = collect_gleason
-    else:
+    elif collector == "nepc":
         args = SimpleNamespace(
             **common,
             note_types=None,
@@ -106,6 +107,15 @@ def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collec
             scan_workers=1,
         )
         target = collect_nepc
+    else:
+        args = SimpleNamespace(
+            **common,
+            note_types=None,
+            context_chars=1500,
+            payload_max_chars=60_000,
+            scan_workers=1,
+        )
+        target = collect_met_dx
 
     with pytest.raises(ValueError, match="prostate-specific"):
         target(args)

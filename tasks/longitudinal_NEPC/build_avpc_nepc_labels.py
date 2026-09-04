@@ -5,8 +5,8 @@ calls, no resume fingerprint, no chunk log. It reads
 `avpc_nepc_timeline.parquet` (built by `build_nepc_timeline.py`) and derives,
 per patient:
 
-- `AVPC`: >=3 distinct Aparicio `C1`-`C7` criteria, timed at the earliest
-  `event_date` the count first reaches 3.
+- `AVPC`: >=4 distinct Aparicio `C1`-`C7` criteria, timed at the earliest
+  `event_date` the count first reaches 4.
 - `NEPC_TIMELINE`: any `NEPC:*` criterion, timed at the earliest such
   `event_date`.
 - `AVPC_NEPC` (modeled): the union of the two, with NEPC-precedence timing --
@@ -36,7 +36,7 @@ from tasks.longitudinal_NEPC.build_nepc_timeline import (  # noqa: E402
 
 AVPC_KEYS = {f"C{i}" for i in range(1, 8)}
 NEPC_KEYS = {key for key in VALID_CRITERIA if key.startswith("NEPC:")}
-AVPC_THRESHOLD = 3
+AVPC_THRESHOLD = 4
 
 LABEL_COLUMNS = [
     "DFCI_MRN",
@@ -62,7 +62,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Reduce the AVPC/NEPC criteria timeline into one patient-level "
-            "label row (>=3 Aparicio criteria and/or any NEPC feature, with "
+            "label row (>=4 Aparicio criteria and/or any NEPC feature, with "
             "NEPC-precedence timing)."
         )
     )
@@ -111,7 +111,8 @@ def _build_patient_label(mrn, rows):
     # which the cumulative C-only count first reaches AVPC_THRESHOLD.
     # Same-date blocks are applied together (matching build_timeline's own
     # same-date cumulative-count semantics) so a block that pushes the count
-    # from 1 to 3 in one date is dated at that date.
+    # from below AVPC_THRESHOLD to at or above it in one date is dated at that
+    # date.
     c_seen = set()
     avpc_date = None
     avpc_row = None
@@ -184,7 +185,8 @@ def _build_patient_label(mrn, rows):
     has_avpc_nepc = 1 if (has_avpc or has_nepc_timeline) else 0
 
     # Undated-only-positive demotion: a patient whose AVPC threshold is
-    # reached only via undated evidence (no dated row ever reaches 3), and
+    # reached only via undated evidence (no dated row ever reaches
+    # AVPC_THRESHOLD), and
     # who has no dated/undated NEPC evidence either, is demoted to negative.
     # A patient with dated NEPC evidence is unaffected (NEPC already timed).
     # A patient with *only* undated NEPC evidence and no dated AVPC/NEPC

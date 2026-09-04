@@ -30,6 +30,10 @@ python tasks/longitudinal_NEPC/build_nepc_timeline.py --output-dir /path/to/out 
 python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out
 python tasks/nepc_diagnosis/build_nepc_dx_labels.py --output-dir /path/to/out --provider dfci_gpt
 
+# Metastatic prostate cancer label + first-mention date
+python preprocessing/cli/collect_met_dx_notes.py --output-dir /path/to/out
+python tasks/met_diagnosis/build_met_dx_labels.py --output-dir /path/to/out --provider dfci_gpt
+
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
@@ -148,6 +152,27 @@ Every task is split into a **preprocessing** step and a **task runner**:
    adjudicated under two different gates. `nepc_dx_rejected_findings.parquet`
    records every rejected finding with its reason and is the tuning signal for
    the gate.
+
+   `met_diagnosis` answers "does the record establish metastatic prostate
+   cancer, and when was it first documented?", and is built on the same
+   strict-precision machinery as `nepc_diagnosis`: quote grounding with
+   source-date equality, a deterministic gate (`tasks/met_diagnosis/veto.py`)
+   hashed into the run fingerprint via `VETO_VERSION`, and a per-patient
+   adjudication producing one label row. Three things are specific to it. The
+   gate must separate M1 from N1 — regional pelvic nodal disease alone does not
+   qualify even though pathology writes it as "metastatic adenocarcinoma in 2 of
+   14 pelvic lymph nodes" — so it carries a whole-quote `regional_nodal_only`
+   check that the NEPC gate has no analogue for. A non-prostate organ near the
+   term is usually the metastatic *destination* rather than a competing primary,
+   the reverse of the NEPC case, so a site vetoes only alongside a
+   primary-attribution cue. And `met_site` (bone / visceral / distant_nodal /
+   unspecified) is validated against the grounded quote, which is what makes the
+   M1-vs-N1 call auditable. Because metastatic disease is rarely given an
+   explicit date in text, the earliest-qualifying-note-date path is the common
+   one rather than an edge case, and it spans every veto-passing candidate for
+   the patient rather than only those sharing the adjudicated finding's
+   `evidence_type` — the same fact is routinely first written by a radiologist
+   and only later restated by an oncologist.
 
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.

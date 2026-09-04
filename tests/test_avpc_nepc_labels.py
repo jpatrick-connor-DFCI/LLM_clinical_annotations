@@ -60,7 +60,31 @@ def _labels_by_mrn(path):
     return {row["DFCI_MRN"]: row for row in pl.read_parquet(path).to_dicts()}
 
 
-def test_third_criterion_sets_avpc_date(tmp_path):
+def test_fourth_criterion_sets_avpc_date(tmp_path):
+    timeline = tmp_path / "timeline.parquet"
+    labels_path = tmp_path / "labels.parquet"
+    rows = [
+        _row(1, "C1", "2020-01-01"),
+        _row(1, "C2", "2020-02-01"),
+        _row(1, "C3", "2020-03-01"),
+        _row(1, "C4", "2020-04-01"),
+    ]
+    _write_timeline(timeline, rows)
+
+    assert labels.build_labels(timeline, labels_path) == 1
+    row = _labels_by_mrn(labels_path)[1]
+    assert row["has_avpc"] == 1
+    # Dated at the 4th criterion, not the 3rd: AVPC_THRESHOLD == 4.
+    assert row["avpc_date"] == "2020-04-01"
+    assert row["n_avpc_criteria"] == 4
+    assert row["has_avpc_nepc"] == 1
+    assert row["avpc_nepc_date"] == "2020-04-01"
+    assert row["label_source"] == "timeline_positive"
+    assert row["avpc_criteria"] == ["C1", "C2", "C3", "C4"]
+
+
+def test_three_criteria_stays_negative(tmp_path):
+    """Boundary guard for AVPC_THRESHOLD == 4: three criteria is not enough."""
     timeline = tmp_path / "timeline.parquet"
     labels_path = tmp_path / "labels.parquet"
     rows = [
@@ -70,43 +94,24 @@ def test_third_criterion_sets_avpc_date(tmp_path):
     ]
     _write_timeline(timeline, rows)
 
-    assert labels.build_labels(timeline, labels_path) == 1
-    row = _labels_by_mrn(labels_path)[1]
-    assert row["has_avpc"] == 1
-    assert row["avpc_date"] == "2020-03-01"
-    assert row["n_avpc_criteria"] == 3
-    assert row["has_avpc_nepc"] == 1
-    assert row["avpc_nepc_date"] == "2020-03-01"
-    assert row["label_source"] == "timeline_positive"
-    assert row["avpc_criteria"] == ["C1", "C2", "C3"]
-
-
-def test_two_criteria_stays_negative(tmp_path):
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-02-01"),
-    ]
-    _write_timeline(timeline, rows)
-
     labels.build_labels(timeline, labels_path)
     row = _labels_by_mrn(labels_path)[1]
     assert row["has_avpc"] == 0
     assert row["avpc_date"] is None
-    assert row["n_avpc_criteria"] == 2
+    assert row["n_avpc_criteria"] == 3
     assert row["has_avpc_nepc"] == 0
     assert row["label_source"] == "timeline_negative"
 
 
-def test_same_date_block_jumps_from_one_to_three(tmp_path):
-    """A same-date block pushing the count 1 -> 3 dates the event at that block."""
+def test_same_date_block_jumps_from_two_to_four(tmp_path):
+    """A same-date block pushing the count 2 -> 4 dates the event at that block."""
     timeline = tmp_path / "timeline.parquet"
     labels_path = tmp_path / "labels.parquet"
     rows = [
         _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-06-01"),
+        _row(1, "C2", "2020-01-01"),
         _row(1, "C3", "2020-06-01"),
+        _row(1, "C4", "2020-06-01"),
     ]
     _write_timeline(timeline, rows)
 
@@ -114,13 +119,15 @@ def test_same_date_block_jumps_from_one_to_three(tmp_path):
     row = _labels_by_mrn(labels_path)[1]
     assert row["has_avpc"] == 1
     assert row["avpc_date"] == "2020-06-01"
-    assert row["n_avpc_criteria"] == 3
+    assert row["n_avpc_criteria"] == 4
 
 
 def test_nepc_precedence_overrides_timing(tmp_path):
-    """C-threshold at day 100 (2020-04-10) + NEPC feature at day 300 (2020-10-27)
-    -> has_avpc==0 (per AVPC's own definition, zero NEPC criteria ever is
-    required), has_nepc_timeline==1, avpc_nepc_date == the NEPC date."""
+    """Three C criteria (below AVPC_THRESHOLD) + a NEPC feature at 2020-10-27
+    -> has_avpc==0, has_nepc_timeline==1, avpc_nepc_date == the NEPC date.
+
+    The union fires on the NEPC arm alone, and NEPC precedence times it.
+    """
     timeline = tmp_path / "timeline.parquet"
     labels_path = tmp_path / "labels.parquet"
     rows = [
@@ -165,15 +172,21 @@ def test_nepc_keys_never_contribute_to_c_count(tmp_path):
 
 
 def test_undated_only_positive_is_demoted(tmp_path):
-    """A patient who would cross 3 criteria only via undated evidence is
-    demoted to has_avpc_nepc = 0."""
+    """A patient who would cross AVPC_THRESHOLD only via undated evidence is
+    demoted to has_avpc_nepc = 0.
+
+    Dated criteria reach 3 (one short of the threshold); the undated 4th would
+    tip it over but cannot time the event, so the patient is demoted rather
+    than counted as an untimed positive.
+    """
     timeline = tmp_path / "timeline.parquet"
     labels_path = tmp_path / "labels.parquet"
     rows = [
         _row(1, "C1", "2020-01-01"),
         _row(1, "C2", "2020-02-01"),
+        _row(1, "C3", "2020-03-01"),
         # Undated: event_date is None.
-        _row(1, "C3", None, date_source=None, date_precision="unknown"),
+        _row(1, "C4", None, date_source=None, date_precision="unknown"),
     ]
     _write_timeline(timeline, rows)
 
@@ -183,7 +196,7 @@ def test_undated_only_positive_is_demoted(tmp_path):
     assert row["avpc_date"] is None
     assert row["has_avpc_nepc"] == 0
     # Only dated criteria count toward n_avpc_criteria.
-    assert row["n_avpc_criteria"] == 2
+    assert row["n_avpc_criteria"] == 3
     assert row["label_source"] == "timeline_negative"
 
 

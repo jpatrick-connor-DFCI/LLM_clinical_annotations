@@ -82,7 +82,18 @@ TRIGGER_REGEX = {
         r"(?:"
         r"\bmetasta\w*\b|"
         r"\bmets\b|"
-        r"(?:\b|(?<=\d))m1[abc]?\b|"
+        # Two forms: a standalone M category, and an M1 buried inside a
+        # contiguous TNM string (T3bN0M1b), which has no word boundary anywhere
+        # in it -- so the whole token is matched, anchored at the leading
+        # (c/p/y)T. It cannot be done with a lookbehind: this pattern is pushed
+        # down into Polars' scan_parquet predicate, and Polars uses Rust's regex
+        # crate, which rejects lookaround outright. Spelling the token out is
+        # also tighter than an optional leading digit -- it keeps incidental
+        # strings like a "3M1" room number out of the candidate set. The veto's
+        # equivalent pattern keeps its lookbehind, since it runs under Python's
+        # re on loaded text and its match offsets drive the windowed checks.
+        r"\bm1[abc]?\b|"
+        r"\b(?:[cpy]{1,2})?t[0-4][a-d]?n[0-3][a-c]?m1[abc]?\b|"
         r"\bstage\s+(?:iv|4)\b|"
         r"\bdistant\s+(?:disease|spread|sites?|metasta\w*)\b|"
         r"\bwidespread\s+(?:disease|osseous|skeletal)\b|"

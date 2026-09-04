@@ -22,7 +22,7 @@ import pytest
 
 from preprocessing.config import MET_DX_EVIDENCE_SCHEMA_VERSION
 from preprocessing.longitudinal import file_sha256, write_scan_config_meta
-from preprocessing.triggers import find_trigger_matches
+from preprocessing.triggers import combined_text_pattern, find_trigger_matches
 from tasks.met_diagnosis import build_met_dx_labels as md
 from tasks.met_diagnosis.prompts import (
     MET_DX_MAP_PROMPT,
@@ -78,10 +78,47 @@ def test_met_triggers_match_metastasis_language(text):
         "S/p radical prostatectomy in 2018.",
         "Castration-resistant prostate cancer.",
         "Continue leuprolide every 3 months.",
+        "Clinical stage T2cN0M0.",
+        # Not a TNM string -- the M-category patterns must not fire on it.
+        "Room 3M1 on the ward.",
     ],
 )
 def test_met_triggers_drop_unrelated_prostate_language(text):
     assert not find_trigger_matches(text, MET_TRIGGERS)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # A contiguous TNM string has no word boundary anywhere inside it, so a
+        # plain \bm1\b never matches one. These are the explicitly-staged
+        # metastatic patients, so missing them would be a silent recall hole.
+        ("Clinical stage T3bN0M1b.", True),
+        ("Stage T2cN1M1.", True),
+        ("pT3aN1M1c disease.", True),
+        ("ypT2N0M1.", True),
+        ("He has M1b prostate cancer.", True),
+        ("Clinical stage T2cN0M0.", False),
+        ("Room 3M1 on the ward.", False),
+    ],
+)
+def test_trigger_pattern_runs_under_the_polars_regex_engine(text, expected):
+    """The collector's pattern must be valid for RUST regex, not just Python re.
+
+    combined_text_pattern() is pushed into scan_parquet's predicate, where
+    Polars compiles it with Rust's regex crate. That crate rejects lookaround
+    outright, so a pattern using it parses fine under Python's re -- and under
+    find_trigger_matches -- while failing at load time against real parquets.
+    Exercising the pattern through Polars is the only way this file can catch
+    that class of defect.
+    """
+    pattern = combined_text_pattern(MET_TRIGGERS)
+    got = (
+        pl.DataFrame({"t": [text]})
+        .select(pl.col("t").str.contains(pattern))["t"]
+        .to_list()[0]
+    )
+    assert got is expected
 
 
 # --------------------------------------------------------------------------

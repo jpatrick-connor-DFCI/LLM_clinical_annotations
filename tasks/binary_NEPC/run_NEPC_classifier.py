@@ -210,7 +210,7 @@ def _normalize_model_result(result, snippets):
     criteria = normalized.get("avpc_criteria")
     if isinstance(criteria, list):
         normalized["visceral_met_pattern"] = (
-            "visceral_only" if "C2" in criteria else "none"
+            "visceral_only" if "C3" in criteria else "none"
         )
 
     quotes = normalized.get("supporting_quotes")
@@ -376,8 +376,8 @@ def validate_result(result, snippets):
     visceral_pattern = result.get("visceral_met_pattern")
     if visceral_pattern not in {"visceral_only", "none"}:
         return None, f"invalid_visceral_met_pattern:{visceral_pattern}"
-    if ("C2" in criteria) != (visceral_pattern == "visceral_only"):
-        return None, "inconsistent_c2_visceral_pattern"
+    if ("C3" in criteria) != (visceral_pattern == "visceral_only"):
+        return None, "inconsistent_c3_visceral_pattern"
 
     normalized_genes = {str(value).strip().upper() for value in result["biomarker_genes"]}
     expected_biomarker = bool(normalized_genes & {"BRCA1", "BRCA2"})

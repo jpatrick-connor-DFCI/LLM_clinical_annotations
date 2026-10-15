@@ -61,13 +61,19 @@ def test_legacy_binary_snippet_bundle_is_rejected_after_trigger_expansion(tmp_pa
         load_snippet_bundle(path)
 
 
-def test_binary_avpc_prompt_uses_the_canonical_c2_contract():
-    assert "C2 exclusively visceral metastases" in CLASSIFY_SYSTEM_PROMPT
-    assert "Liver and other visceral organs qualify" in CLASSIFY_SYSTEM_PROMPT
-    assert "concurrent bone or other non-visceral metastases mean C2 is NOT met" in (
+def test_binary_avpc_prompt_uses_the_canonical_c2_c3_contract():
+    assert "C2 predominantly lytic bone metastases, rather than blastic" in (
         CLASSIFY_SYSTEM_PROMPT
     )
-    assert "C2  EXCLUSIVELY visceral metastases" in CANONICAL_CRITERIA
+    assert "C3 exclusively visceral metastases" in CLASSIFY_SYSTEM_PROMPT
+    assert "Liver and other visceral organs qualify" in CLASSIFY_SYSTEM_PROMPT
+    assert "concurrent bone or other non-visceral metastases mean C3 is NOT met" in (
+        CLASSIFY_SYSTEM_PROMPT
+    )
+    assert "C2  Radiographically predominantly LYTIC bone metastases" in (
+        CANONICAL_CRITERIA
+    )
+    assert "C3  EXCLUSIVELY visceral metastases" in CANONICAL_CRITERIA
     assert "visceral_and_bone" not in CLASSIFY_SYSTEM_PROMPT
 
 
@@ -242,7 +248,7 @@ def test_binary_result_normalization_repairs_deterministic_model_mistakes():
         "has_molecular_avpc": False,
         "has_non_prostate_primary": False,
         "biomarker_genes": ["PTEN", "TP53"],
-        "avpc_criteria": "C3",
+        "avpc_criteria": "C2",
         "visceral_met_pattern": "visceral_only",
         "non_prostate_primary_types": [],
         "supporting_quotes": quote,
@@ -255,7 +261,7 @@ def test_binary_result_normalization_repairs_deterministic_model_mistakes():
 
     assert normalized["primary_label"] == "avpc"
     assert normalized["has_molecular_avpc"] is True
-    assert normalized["avpc_criteria"] == ["C3"]
+    assert normalized["avpc_criteria"] == ["C2"]
     assert normalized["visceral_met_pattern"] == "none"
     assert normalized["supporting_quotes"] == [quote]
     assert normalized["supporting_quote_dates"] == ["2024-03-04"]

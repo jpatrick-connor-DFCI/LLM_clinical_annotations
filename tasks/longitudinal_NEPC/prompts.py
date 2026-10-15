@@ -3,15 +3,24 @@
 
 # Bump this whenever either prompt's semantics or output contract changes. The
 # stage-2 run fingerprint includes both this value and the complete prompt text.
-PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v6"
+PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v7"
+
+# Longest quote the map stage is asked to return. Quotes are most of a map
+# reply, so the cap keeps replies inside the output token limit; the runner
+# still grounds a longer quote and stores it up to MAX_QUOTE_CHARS.
+PROMPT_QUOTE_MAX_CHARS = 300
 
 
 CANONICAL_CRITERIA = """
 ### Canonical Aparicio aggressive-variant criteria
 C1  Histologic evidence of small-cell prostate carcinoma (pure or mixed).
-C2  EXCLUSIVELY visceral metastases. Liver and other visceral organs qualify;
-    concurrent bone or other non-visceral metastases mean C2 is NOT met.
-C3  Radiographically predominant lytic bone metastases.
+C2  Radiographically predominantly LYTIC bone metastases, rather than blastic.
+    Concurrent visceral, nodal, or other metastases are allowed. Blastic- or
+    sclerotic-predominant bone disease does NOT meet C2 even when some lesions
+    are lytic, and neither does mixed disease without documented lytic
+    predominance.
+C3  EXCLUSIVELY visceral metastases. Liver and other visceral organs qualify;
+    concurrent bone or other non-visceral metastases mean C3 is NOT met.
 C4  Bulky (>=5 cm) lymphadenopathy, OR a bulky (>=5 cm) high-grade
     (Gleason score >=8) tumor mass in the prostate/pelvis.
 C5  PSA <=10 ng/mL at initial presentation before ADT, or at symptomatic
@@ -25,7 +34,9 @@ C7  Progression to castration-resistant/androgen-independent disease within
     <=6 months after initiation of hormonal therapy.
 
 Do not relax numeric thresholds, conjunctions, timing requirements, high-grade
-requirements, or the exclusivity requirement.
+requirements, the lytic-predominance requirement, or the exclusivity
+requirement. C2 requires bone metastases and C3 excludes them, so a single
+disease state can never support both.
 
 ### NEPC sub-features (track independently from AVPC criteria)
 NEPC:small_cell_dx              Neuroendocrine or small-cell prostate carcinoma diagnosis.
@@ -73,7 +84,7 @@ component, you may report that criterion in `criteria_found`. The `quote` and
 `prior_history`. This rule overrides the "this chunk alone" phrasing anywhere
 else in these instructions.
 
-C2 is the exception: `prior_history` can only ever DEFEAT C2, never complete
+C3 is the exception: `prior_history` can only ever DEFEAT C3, never complete
 it. Bone or other non-visceral disease recorded in `prior_history` defeats
 exclusivity even when this chunk shows only visceral disease; the absence of
 bone disease in `prior_history` never establishes exclusivity.
@@ -95,12 +106,12 @@ bone disease in `prior_history` never establishes exclusivity.
    help establish one of the definitions above. De-duplicate copy-forward and
    repeated facts. Return at most 30 evidence items under all circumstances;
    if more are available, retain threshold-crossing values, the earliest event,
-   disease sites needed for C2 exclusivity, and the strongest pathology first.
+   disease sites needed for C3 exclusivity, and the strongest pathology first.
 
    Use only these `fact_type` values for each candidate criterion:
    - C1: small_cell_histology
-   - C2: visceral_site | bone_metastasis_status | non_visceral_metastasis_status
-   - C3: lytic_bone_pattern
+   - C2: lytic_bone_pattern
+   - C3: visceral_site | bone_metastasis_status | non_visceral_metastasis_status
    - C4: bulky_nodal_measurement | prostate_pelvic_mass_measurement | gleason_score
    - C5: psa_value | disease_context | bone_metastasis_count
    - C6: neuroendocrine_marker | ldh_value_and_uln | cea_value_and_uln |
@@ -113,7 +124,7 @@ bone disease in `prior_history` never establishes exclusivity.
 
    `candidate_criterion` and `fact_type` must be one exact pair from that list.
    Never put a criterion prefix in `fact_type` (use `bone_metastasis_status`,
-   not `C2:bone_metastasis_status`) and never invent a synonym or new fact type.
+   not `C3:bone_metastasis_status`) and never invent a synonym or new fact type.
 
 ## RULES
 - Use only the snippets. Findings must be documented as present, not suspected,
@@ -128,17 +139,25 @@ bone disease in `prior_history` never establishes exclusivity.
   ranges, or impossible calendar dates.
 - `source_note_date` must exactly copy the `note_date` of the supporting snippet.
 - Quotes must be verbatim excerpts from the supplied snippet.
+- Keep each quote to at most {PROMPT_QUOTE_MAX_CHARS} characters: quote the
+  whole sentence when it fits, otherwise the clause that carries the finding,
+  keeping any negation or hedge that applies to it. Never cut words out of the
+  middle of a quote.
 - Each evidence-item quote must itself contain the words/numbers supporting its
   `fact_type`; do not use a nearby quote that supports only a different fact.
 - modality: "pathology" | "imaging" | "clinical" | "labs".
 - confidence: "high" | "medium" | "low".
-- Report C2 in `criteria_found` only when EXCLUSIVELY visceral disease is
+- Report C2 only when the bone metastases are documented as lytic or
+  predominantly lytic. A few lytic lesions within blastic/sclerotic-predominant
+  disease, or mixed disease without stated lytic predominance, does not
+  qualify. Concurrent visceral or nodal metastases never defeat C2.
+- Report C3 in `criteria_found` only when EXCLUSIVELY visceral disease is
   established, and set `visceral_met_pattern` to "visceral_only". Concurrent
   bone or other non-visceral disease defeats exclusivity whether it is
   documented in this chunk or in `prior_history`. If visceral metastases are
-  documented but exclusivity is not established, do NOT report C2 as a
+  documented but exclusivity is not established, do NOT report C3 as a
   criterion -- record the metastatic sites as `evidence_items` instead and let
-  the synthesis stage decide. Use "none" for every non-C2 criterion.
+  the synthesis stage decide. Use "none" for every non-C3 criterion.
 
 ## OUTPUT
 Return only valid JSON:
@@ -150,7 +169,7 @@ Return only valid JSON:
       "source_note_date": "2021-06-03",
       "modality": "clinical",
       "visceral_met_pattern": "none",
-      "quote": "<verbatim>",
+      "quote": "<verbatim, at most {PROMPT_QUOTE_MAX_CHARS} characters>",
       "confidence": "high"
     }}
   ],
@@ -162,7 +181,7 @@ Return only valid JSON:
       "fact_date": "2021-06-01",
       "source_note_date": "2021-06-03",
       "modality": "labs",
-      "quote": "<verbatim>",
+      "quote": "<verbatim, at most {PROMPT_QUOTE_MAX_CHARS} characters>",
       "confidence": "high"
     }}
   ],
@@ -205,11 +224,15 @@ under the same rules as always.
   facts are required, `source_note_date` and the quote should identify the fact
   that completes the criterion; `diagnosis_date` should be the earliest date at
   which every required component is established.
-- For C2, any documented concurrent bone or other non-visceral metastasis at
+- For C2, the combined evidence must document the bone metastases as lytic or
+  predominantly lytic; never infer lytic predominance from a few lytic lesions
+  or from mixed lytic/blastic disease. Concurrent visceral, nodal, or other
+  metastases do not defeat C2.
+- For C3, any documented concurrent bone or other non-visceral metastasis at
   the relevant disease state defeats "exclusively visceral"; liver qualifies.
-  Report C2 only when the combined evidence establishes exclusivity, with
-  `visceral_met_pattern` set to "visceral_only"; omit C2 otherwise. Use "none"
-  for every non-C2 criterion.
+  Report C3 only when the combined evidence establishes exclusivity, with
+  `visceral_met_pattern` set to "visceral_only"; omit C3 otherwise. Use "none"
+  for every non-C3 criterion.
 - Findings must concern prostate cancer and be documented as present.
 - `source_note_date` must be copied exactly from an evidence item.
 - quote must be copied verbatim from an evidence item.
@@ -220,7 +243,7 @@ Return only valid JSON:
 {{
   "criteria_found": [
     {{
-      "criterion": "C2",
+      "criterion": "C3",
       "diagnosis_date": "2021-06-01",
       "source_note_date": "2021-06-03",
       "modality": "imaging",

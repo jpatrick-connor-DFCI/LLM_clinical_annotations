@@ -303,6 +303,7 @@ def test_prompts_state_the_strict_exclusions():
     assert "NEVER copy the note date into this field" in combined
     assert "Never introduce a quote, a date, or a fact" in combined
     assert "none outranks the others" in combined
+    assert "Keep the quote to at most 300 characters" in MET_DX_MAP_PROMPT
 
 
 # --------------------------------------------------------------------------

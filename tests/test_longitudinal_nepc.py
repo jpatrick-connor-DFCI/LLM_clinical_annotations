@@ -57,7 +57,8 @@ def _map_result(criterion, quote, source_date, *, fact_type="finding", fact_valu
 
 def test_prompt_uses_canonical_aparicio_thresholds():
     combined = f"{NEPC_SYSTEM_PROMPT}\n{NEPC_SYNTHESIS_PROMPT}"
-    assert "EXCLUSIVELY visceral" in combined
+    assert "C2  Radiographically predominantly LYTIC bone metastases" in combined
+    assert "C3  EXCLUSIVELY visceral metastases" in combined
     assert "Liver and other visceral organs qualify" in combined
     assert "Gleason score >=8" in combined
     assert "PSA <=10 ng/mL" in combined
@@ -65,6 +66,7 @@ def test_prompt_uses_canonical_aparicio_thresholds():
     assert "LDH >=2 times" in combined
     assert "<=6 months" in combined
     assert "at most 30 evidence items under all circumstances" in combined
+    assert "Keep each quote to at most 300 characters" in NEPC_SYSTEM_PROMPT
     assert "Never put a criterion prefix in `fact_type`" in combined
 
 
@@ -156,8 +158,8 @@ def test_map_validation_keeps_good_findings_alongside_bad_ones():
     assert normalized["rejected"] == {"quote_or_source_not_in_evidence": 1}
 
 
-def test_map_validation_rejects_c2_without_established_exclusivity():
-    """The prompt forbids reporting C2 unless exclusivity is shown; enforce it."""
+def test_map_validation_rejects_c3_without_established_exclusivity():
+    """The prompt forbids reporting C3 unless exclusivity is shown; enforce it."""
     chunks = {
         0: [
             {
@@ -170,7 +172,7 @@ def test_map_validation_rejects_c2_without_established_exclusivity():
     result = {
         "criteria_found": [
             _finding(
-                "C2",
+                "C3",
                 "Imaging shows liver metastases and no bone metastases.",
                 "2021-06-05",
                 "2021-06-05",
@@ -182,7 +184,50 @@ def test_map_validation_rejects_c2_without_established_exclusivity():
     normalized, error = nepc.validate_map_result(result, chunks)
     assert error is None
     assert normalized["criteria_found"] == []
-    assert normalized["rejected"] == {"c2_without_established_exclusivity": 1}
+    assert normalized["rejected"] == {"c3_without_established_exclusivity": 1}
+
+
+def test_map_validation_keeps_lytic_c2_with_concurrent_visceral_disease():
+    """C2 allows other metastatic sites; only C3 carries an exclusivity check."""
+    quote = "CT shows predominantly lytic osseous metastases and new liver lesions."
+    chunks = {0: [{"note_date": "2021-06-05", "note_type": "Imaging", "snippet": quote}]}
+    result = {
+        "criteria_found": [
+            _finding("C2", quote, "2021-06-05", "2021-06-05"),
+            _finding("C3", quote, "2021-06-05", "2021-06-05"),
+        ],
+        "evidence_items": [],
+    }
+    normalized, error = nepc.validate_map_result(result, chunks)
+    assert error is None
+    assert [f["criterion"] for f in normalized["criteria_found"]] == ["C2"]
+    assert normalized["criteria_found"][0]["visceral_met_pattern"] == "none"
+    assert normalized["rejected"] == {"c3_without_established_exclusivity": 1}
+
+
+def test_blastic_only_quote_cannot_support_c2():
+    quote = "Bone scan shows diffuse osteoblastic metastases."
+    chunks = {0: [{"note_date": "2021-06-05", "note_type": "Imaging", "snippet": quote}]}
+    result = {
+        "criteria_found": [_finding("C2", quote, "2021-06-05", "2021-06-05")],
+        "evidence_items": [],
+    }
+    normalized, error = nepc.validate_map_result(result, chunks)
+    assert error is None
+    assert normalized["criteria_found"] == []
+    assert normalized["rejected"] == {"quote_does_not_support_criterion:C2": 1}
+
+
+def test_raw_rows_mark_only_c3_as_visceral_only():
+    findings = [
+        _finding("C2", "lytic", "2021-06-05", None),
+        _finding("C3", "liver", "2021-06-05", None, vmp="visceral_only"),
+    ]
+    rows, _ = nepc.raw_rows_from_findings(123, findings)
+    assert {row["criterion"]: row["visceral_met_pattern"] for row in rows} == {
+        "C2": None,
+        "C3": "visceral_only",
+    }
 
 
 def test_map_validation_fatal_only_on_structural_errors():
@@ -277,7 +322,7 @@ def test_semantically_unrelated_quote_cannot_support_criterion():
     ("criterion", "fact_type", "quote", "source_date"),
     [
         (
-            "C2",
+            "C3",
             "bone_metastasis_status",
             "Bone scan demonstrates at least 24 osseous metastases.",
             "2021-06-05",
@@ -320,7 +365,7 @@ def test_known_fact_type_is_routed_to_its_canonical_criterion():
     assert error is None
     assert not normalized["rejected"]
     item = normalized["evidence_items"][0]
-    assert item["candidate_criterion"] == "C2"
+    assert item["candidate_criterion"] == "C3"
     assert item["fact_type"] == "bone_metastasis_status"
     assert item["_claimed_candidate_criterion"] == "C5"
     assert item["_claimed_fact_type"] == "C5:bone_metastasis_status"
@@ -503,7 +548,7 @@ def test_same_day_events_share_complete_cumulative_count(tmp_path):
     raw = tmp_path / "raw.parquet"
     timeline = tmp_path / "timeline.parquet"
     rows = []
-    for criterion in ("C1", "C3"):
+    for criterion in ("C1", "C2"):
         rows.append(
             {
                 "DFCI_MRN": 123,

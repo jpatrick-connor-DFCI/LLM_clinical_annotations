@@ -660,11 +660,11 @@
         <div class="grid-3">
           <div class="card card-pad">
             <h3>Provider adapters</h3>
-            <p>Both backends implement <code>build_client()</code> and <code>call_with_retry()</code>.</p>
+            <p>Both backends implement <code>build_client()</code> and <code>call_with_retry()</code>. Vertex keeps JSON completed before the output cap, then regenerates a truncated reply with more room and a higher temperature.</p>
             <div class="pill-list">
               <span class="pill">DFCI Azure OpenAI</span>
               <span class="pill">Google Vertex AI</span>
-              <span class="pill">temperature = 0</span>
+              <span class="pill">temperature = 0 (Gemini 3: default)</span>
             </div>
           </div>
           <div class="card card-pad">
@@ -735,7 +735,7 @@
           <div class="process-step"><div><strong>Rank and bound each patient payload.</strong><p>Candidates sort descending by number of trigger categories, raw trigger count, and recency. The collector keeps at most 75 snippets and stops before the 300,000-character payload budget is exceeded.</p></div></div>
           <div class="process-step"><div><strong>Write a versioned Parquet bundle.</strong><p><code>LLM_NEPC_classifier_patient_snippets.parquet</code> stores version 3 metadata, one row per ordered snippet, and sentinel rows that preserve no-trigger and no-note cohort members.</p></div></div>
           <div class="process-step"><div><strong>Separate deterministic and LLM paths.</strong><p>Triggered patients receive one LLM call. Patients with notes but no trigger are written as high-confidence conventional/no-trigger rows. Cohort patients with no notes are written as unclassified <code>no_notes</code> rows.</p></div></div>
-          <div class="process-step"><div><strong>Parse and enforce cross-field invariants.</strong><p>The runner validates JSON types, label precedence, AVPC criteria, C2 pattern, biomarker/molecular flags, second-primary flags, confidence, rationale, and quote/date grounding before writing a success.</p></div></div>
+          <div class="process-step"><div><strong>Parse and enforce cross-field invariants.</strong><p>The runner validates JSON types, label precedence, AVPC criteria, C3 pattern, biomarker/molecular flags, second-primary flags, confidence, rationale, and quote/date grounding before writing a success.</p></div></div>
           <div class="process-step"><div><strong>Resume safely.</strong><p>A run fingerprint binds the snippet SHA-256, provider, model, prompt, safety context, schema version, and output columns. Changed inputs/configuration require <code>--overwrite</code>. <code>--retry-failures</code> targets only the failure ledger.</p></div></div>
         </div>
       </div>
@@ -796,7 +796,7 @@
           <div class="field"><code>has_non_prostate_primary</code><p>Independent second-primary cancer flag.</p></div>
           <div class="field"><code>biomarker_genes</code><p>Native Parquet list containing the deduplicated set of all documented somatic alterations/markers.</p></div>
           <div class="field"><code>avpc_criteria</code><p>Native Parquet list containing the documented subset of C1–C7.</p></div>
-          <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for C2, otherwise <code>none</code>.</p></div>
+          <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for C3, otherwise <code>none</code>.</p></div>
           <div class="field"><code>non_prostate_primary_types</code><p>Native Parquet list of cancer types.</p></div>
           <div class="field"><code>supporting_quotes</code><p>Native Parquet list of grounded verbatim evidence.</p></div>
           <div class="field"><code>supporting_quote_dates</code><p>Source dates aligned one-to-one with quotes.</p></div>
@@ -858,7 +858,7 @@
           <div class="process-step"><div><strong>Assign stable patient chunk indices.</strong><p>Snippets sort by note date and snippet text, then pack greedily under 60,000 characters. The collector writes <code>DFCI_MRN</code>, <code>chunk_index</code>, <code>note_date</code>, <code>note_type</code>, and <code>snippet</code>.</p></div></div>
           <div class="process-step"><div><strong>Fingerprint the evidence generation.</strong><p>The sidecar records content/config hash, evidence SHA-256, schema version, context/snippet/payload settings, note types, and cohort count. A mismatch requires an intentional overwrite.</p></div></div>
           <div class="process-step"><div><strong>Map every outstanding chunk.</strong><p>The first prompt returns complete <code>criteria_found</code> plus up to 30 structured <code>evidence_items</code> such as PSA values, lesion counts, metastatic sites, lab values/ULNs, measurements, markers, and therapy/progression dates.</p></div></div>
-          <div class="process-step"><div><strong>Validate map findings individually.</strong><p>Structural response failures reject the call; malformed individual findings are dropped while valid siblings survive. Criterion/fact-type enums, modality, confidence, quote relevance, quote grounding, source date, event date, and C2 exclusivity are checked.</p></div></div>
+          <div class="process-step"><div><strong>Validate map findings individually.</strong><p>Structural response failures reject the call; malformed individual findings are dropped while valid siblings survive. Criterion/fact-type enums, modality, confidence, quote relevance, quote grounding, source date, event date, and C3 exclusivity are checked.</p></div></div>
           <div class="process-step"><div><strong>Synthesize only complete patient maps.</strong><p>Once every expected chunk has a successful map, a second LLM call combines facts across chunks. It may establish composite criteria but cannot relax thresholds, required conjunctions, timing, high-grade status, or exclusivity.</p></div></div>
           <div class="process-step"><div><strong>Validate and select one onset per criterion.</strong><p>Synthesis findings receive the same grounding checks. Duplicate criteria retain the earliest supportable event, with date precision used to avoid claiming an imprecise period is certainly earlier than an overlapping precise date.</p></div></div>
           <div class="process-step"><div><strong>Rebuild auditable products.</strong><p>Validated raw findings, rejected-finding audit, and the cumulative timeline are regenerated from durable map/synthesis logs, keeping derived products consistent with current successful state.</p></div></div>
@@ -872,8 +872,8 @@
             <thead><tr><th>Code</th><th>Definition enforced by prompt/validator workflow</th></tr></thead>
             <tbody>
               <tr><td>C1</td><td>Histologic small-cell prostate carcinoma, pure or mixed.</td></tr>
-              <tr><td>C2</td><td>Exclusively visceral metastases; concurrent bone or other non-visceral disease defeats the criterion.</td></tr>
-              <tr><td>C3</td><td>Radiographically predominant lytic bone metastases.</td></tr>
+              <tr><td>C2</td><td>Radiographically predominantly lytic (not blastic) bone metastases; concurrent visceral, nodal, or other metastases are allowed.</td></tr>
+              <tr><td>C3</td><td>Exclusively visceral metastases; concurrent bone or other non-visceral disease defeats the criterion.</td></tr>
               <tr><td>C4</td><td>Bulky ≥5 cm lymphadenopathy, or a ≥5 cm high-grade (Gleason ≥8) prostate/pelvic mass.</td></tr>
               <tr><td>C5</td><td>PSA ≤10 ng/mL in a qualifying disease context plus at least 20 bone metastases.</td></tr>
               <tr><td>C6</td><td>Qualifying neuroendocrine marker plus LDH/CEA ≥2× ULN or malignant hypercalcemia, without another cause.</td></tr>
@@ -900,7 +900,7 @@
         </div>
         <p style="margin-top:0.8rem;color:var(--muted);font-size:0.86rem">
           The extraction fingerprint binds the evidence scan hash, provider, model, both full
-          prompts, and prompt schema version <code>longitudinal-nepc-v5</code>.
+          prompts, and prompt schema version <code>longitudinal-nepc-v7</code>.
         </p>
       </div>
 
@@ -914,7 +914,7 @@
               <tr><td><code>avpc_nepc_evidence.meta.parquet</code></td><td>One-row scan configuration, evidence digest/version, resolved sizing, note-type and cohort metadata</td></tr>
               <tr><td><code>avpc_nepc_processed_chunks.parquet</code></td><td>Chunk counts/status, scan/run fingerprints, and validated map <code>result_json</code></td></tr>
               <tr><td><code>avpc_nepc_processed_patients.parquet</code></td><td>Patient synthesis status/counts, run fingerprint, and validated synthesis <code>result_json</code></td></tr>
-              <tr><td><code>avpc_nepc_extractions_raw.parquet</code></td><td>Validated pre-timeline criterion findings with source chunk/date, modality, C2 pattern, quote, confidence</td></tr>
+              <tr><td><code>avpc_nepc_extractions_raw.parquet</code></td><td>Validated pre-timeline criterion findings with source chunk/date, modality, C3 pattern, quote, confidence</td></tr>
               <tr><td><code>avpc_nepc_rejected_findings.parquet</code></td><td>MRN, map/synthesis stage, chunk index, rejection reason, original item JSON, run fingerprint</td></tr>
               <tr><td><code>avpc_nepc_timeline.parquet</code></td><td>Final cumulative criterion-onset timeline</td></tr>
             </tbody>
@@ -932,7 +932,7 @@
           <div class="field"><code>criterion_added</code><p>C1–C7 or an NEPC sub-feature code.</p></div>
           <div class="field"><code>criterion_label</code><p>Human-readable canonical definition.</p></div>
           <div class="field"><code>modality</code><p>Pathology, imaging, clinical, or labs.</p></div>
-          <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for valid C2.</p></div>
+          <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for valid C3.</p></div>
           <div class="field"><code>cumulative_criteria</code><p>Native Parquet list of criteria established by that date.</p></div>
           <div class="field"><code>num_criteria_to_date</code><p>Cumulative criterion count.</p></div>
           <div class="field"><code>supporting_quote</code><p>Grounded verbatim onset evidence.</p></div>

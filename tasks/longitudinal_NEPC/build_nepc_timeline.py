@@ -64,8 +64,8 @@ DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_avpc_nepc_timeline"
 
 CRITERION_LABELS = {
     "C1": "histologic small-cell prostate carcinoma",
-    "C2": "exclusively visceral metastases",
-    "C3": "predominantly lytic bone metastases",
+    "C2": "predominantly lytic bone metastases",
+    "C3": "exclusively visceral metastases",
     "C4": "bulky nodal disease or >=5 cm high-grade prostate/pelvic mass",
     "C5": "PSA <=10 ng/mL plus >=20 bone metastases",
     "C6": "neuroendocrine marker plus qualifying LDH/CEA/hypercalcemia",
@@ -146,12 +146,12 @@ REJECTED_COLUMNS = [
 
 VALID_FACT_TYPES_BY_CRITERION = {
     "C1": {"small_cell_histology"},
-    "C2": {
+    "C2": {"lytic_bone_pattern"},
+    "C3": {
         "visceral_site",
         "bone_metastasis_status",
         "non_visceral_metastasis_status",
     },
-    "C3": {"lytic_bone_pattern"},
     "C4": {
         "bulky_nodal_measurement",
         "prostate_pelvic_mass_measurement",
@@ -210,11 +210,11 @@ MODALITY_ALIASES = {
 
 CRITERION_QUOTE_PATTERNS = {
     "C1": r"\b(?:small[\s-]?cell|scpc|scnc|oat[\s-]?cell)\b",
-    "C2": (
+    "C2": r"\b(?:lytic|osteolytic|destructive\s+bone)\b",
+    "C3": (
         r"\b(?:visceral|liver|hepatic|lung|pulmonary|adrenal|brain|"
         r"pleur\w*|peritone\w*)\b"
     ),
-    "C3": r"\b(?:lytic|osteolytic|destructive\s+bone)\b",
     "C4": (
         r"\b(?:bulky|lymphadenopathy|adenopathy|nodal|prostat\w*|pelvic|gleason)\b"
         r"|(?:\b(?:[5-9]|[1-9]\d+)(?:\.\d+)?\s*cm\b)"
@@ -246,7 +246,7 @@ FACT_TYPE_QUOTE_PATTERNS = {
     "small_cell_histology": (
         r"\b(?:small[\s-]?cell|scpc|scnc|oat[\s-]?cell)\b"
     ),
-    "visceral_site": CRITERION_QUOTE_PATTERNS["C2"],
+    "visceral_site": CRITERION_QUOTE_PATTERNS["C3"],
     "bone_metastasis_status": r"\b(?:bone|osseous|skeletal)\b",
     "non_visceral_metastasis_status": (
         r"\b(?:bone|osseous|skeletal|nodal|lymph\s+node|soft[\s-]?tissue)\b"
@@ -668,24 +668,25 @@ def _validate_common_finding(item, chunks, *, date_field):
     return normalized, None
 
 
-def _resolve_c2_pattern(normalized):
+def _resolve_c3_pattern(normalized):
     """Return (visceral_met_pattern, reject_reason) for one validated finding.
 
-    C2 is "exclusively visceral", so a finding the model itself marks as having
+    C3 is "exclusively visceral", so a finding the model itself marks as having
     concurrent bone/non-visceral disease contradicts the criterion it is claiming
     and is rejected as that single finding. Any other criterion carries "none":
-    visceral_met_pattern is only meaningful for C2.
+    visceral_met_pattern is only meaningful for C3. C2 (lytic bone) needs no
+    such check because concurrent metastases at other sites never defeat it.
     """
-    if normalized["criterion"] != "C2":
+    if normalized["criterion"] != "C3":
         return "none", None
     vmp = normalized.get("visceral_met_pattern")
     if vmp == "visceral_only":
         return "visceral_only", None
     if vmp in (None, "", "none"):
         # The map prompt says to use "none" when exclusivity isn't established in
-        # this chunk; that is a not-yet-supported C2, not a malformed response.
-        return None, "c2_without_established_exclusivity"
-    return None, f"invalid_c2_visceral_met_pattern:{vmp}"
+        # this chunk; that is a not-yet-supported C3, not a malformed response.
+        return None, "c3_without_established_exclusivity"
+    return None, f"invalid_c3_visceral_met_pattern:{vmp}"
 
 
 def validate_map_result(result, chunks):
@@ -728,9 +729,9 @@ def validate_map_result(result, chunks):
                 item,
             )
             continue
-        vmp, c2_reject = _resolve_c2_pattern(normalized)
-        if c2_reject:
-            record_rejection(c2_reject, item)
+        vmp, c3_reject = _resolve_c3_pattern(normalized)
+        if c3_reject:
+            record_rejection(c3_reject, item)
             continue
         normalized["visceral_met_pattern"] = vmp
         normalized_found.append(normalized)
@@ -854,9 +855,9 @@ def validate_synthesis_result(result, chunks):
             )
             continue
         criterion = normalized["criterion"]
-        vmp, c2_reject = _resolve_c2_pattern(normalized)
-        if c2_reject:
-            record_rejection(c2_reject, item)
+        vmp, c3_reject = _resolve_c3_pattern(normalized)
+        if c3_reject:
+            record_rejection(c3_reject, item)
             continue
         normalized["visceral_met_pattern"] = vmp
         existing = by_criterion.get(criterion)
@@ -1196,7 +1197,7 @@ def raw_rows_from_findings(mrn, findings, chunks=None):
                 "diagnosis_date": finding.get("diagnosis_date"),
                 "modality": finding.get("modality"),
                 "visceral_met_pattern": (
-                    "visceral_only" if criterion == "C2" else None
+                    "visceral_only" if criterion == "C3" else None
                 ),
                 "quote": _normalized_text(finding.get("quote")),
                 "confidence": finding.get("confidence"),

@@ -9,7 +9,12 @@ stage-2 run fingerprint hashes this value and both prompt texts, so a changed
 prompt forces --overwrite rather than mixing output generations.
 """
 
-PROMPT_SCHEMA_VERSION = "nepc-dx-v3"
+PROMPT_SCHEMA_VERSION = "nepc-dx-v4"
+
+# Longest quote the map stage is asked to return. Quotes are most of a map
+# reply, so the cap keeps replies inside the output token limit; the runner
+# still grounds a longer quote and stores it up to MAX_QUOTE_CHARS.
+PROMPT_QUOTE_MAX_CHARS = 300
 
 
 QUALIFYING_DEFINITION = """
@@ -96,7 +101,10 @@ anything matching the "does NOT qualify" list above.
 - The diagnosis must concern the patient's own prostate-derived disease.
 - `quote` must be copied verbatim from one supplied snippet, and must itself
   contain both the diagnosis term and the words that assert it. Do not stitch
-  together text from two places. Keep the quote to one or two sentences.
+  together text from two places.
+- Keep the quote to at most {PROMPT_QUOTE_MAX_CHARS} characters, and to one or
+  two sentences: quote whole sentences when they fit, otherwise the clause that
+  carries the diagnosis, keeping any negation or hedge that applies to it.
 - `source_note_date` must exactly copy the `note_date` of the snippet the quote
   came from.
 - `stated_diagnosis_date` is a diagnosis date explicitly stated in the text
@@ -121,7 +129,7 @@ Return only valid JSON:
       "stated_diagnosis_date": "2021-03-01",
       "source_note_date": "2021-04-12",
       "modality": "pathology",
-      "quote": "<verbatim>",
+      "quote": "<verbatim, at most {PROMPT_QUOTE_MAX_CHARS} characters>",
       "confidence": "high"
     }}
   ]

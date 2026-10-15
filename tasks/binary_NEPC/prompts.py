@@ -25,11 +25,15 @@ Each snippet was selected because it contains language relevant to one of:
    b. avpc — chart documents aggressive-variant or anaplastic prostate cancer language, OR
       satisfies one or more Aparicio aggressive-variant criteria:
         C1 small-cell histology
-        C2 exclusively visceral metastases. Liver and other visceral organs qualify;
-           concurrent bone or other non-visceral metastases mean C2 is NOT met. When
-           C2 is set, `visceral_met_pattern` must be "visceral_only". When C2 is not
+        C2 predominantly lytic bone metastases, rather than blastic. Concurrent
+           visceral, nodal, or other metastases are allowed. Blastic- or
+           sclerotic-predominant bone disease does NOT meet C2 even when some
+           lesions are lytic, and neither does mixed disease without documented
+           lytic predominance.
+        C3 exclusively visceral metastases. Liver and other visceral organs qualify;
+           concurrent bone or other non-visceral metastases mean C3 is NOT met. When
+           C3 is set, `visceral_met_pattern` must be "visceral_only". When C3 is not
            set, it must be "none".
-        C3 predominantly lytic bone metastases
         C4 bulky (>=5 cm) lymphadenopathy, OR a bulky (>=5 cm) high-grade
            (Gleason score >=8) prostate/pelvic tumor mass
         C5 PSA <=10 ng/mL at initial presentation before ADT, or at symptomatic

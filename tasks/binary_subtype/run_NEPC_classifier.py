@@ -28,8 +28,8 @@ from preprocessing.parquet_io import (  # noqa: E402
 )
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
-from tasks.binary_NEPC.prompts import CLASSIFY_SYSTEM_PROMPT  # noqa: E402
-from tasks.longitudinal_NEPC.mcrpc_gate import (  # noqa: E402
+from tasks.binary_subtype.prompts import CLASSIFY_SYSTEM_PROMPT  # noqa: E402
+from tasks.longitudinal_subtype.mcrpc_gate import (  # noqa: E402
     CASTRATION_EXEMPT_CRITERIA,
     CASTRATION_RESISTANT,
     CASTRATION_RESISTANT_CRITERIA,
@@ -656,7 +656,7 @@ def _run_fingerprint(snippets_path, provider_name, model):
         CLINICAL_SAFETY_CONTEXT,
         BINARY_EXTRACTION_SCHEMA_VERSION,
         # The disease-state gate decides has_avpc, and its metastatic screen
-        # reuses the met_diagnosis veto.
+        # defers to the met veto (tasks/longitudinal_subtype/met_veto.py).
         GATE_VERSION,
         MET_VETO_VERSION,
         json.dumps(OUTPUT_COLUMNS),
@@ -671,16 +671,16 @@ def _validate_run_fingerprint(path, run_config, has_existing_outputs, overwrite)
         return
     if not path.exists():
         raise ValueError(
-            "Existing binary NEPC outputs predate run fingerprinting. Re-run with "
+            "Existing binary subtype outputs predate run fingerprinting. Re-run with "
             "--overwrite rather than mixing them with the current snippet bundle."
         )
     try:
         recorded = (read_metadata(path) or {}).get("run_config")
     except (OSError, pl.exceptions.PolarsError) as exc:
-        raise ValueError(f"Invalid binary NEPC run metadata: {path}") from exc
+        raise ValueError(f"Invalid binary subtype run metadata: {path}") from exc
     if recorded != run_config:
         raise ValueError(
-            f"Binary NEPC inputs/config changed ({recorded} != {run_config}). "
+            f"Binary subtype inputs/config changed ({recorded} != {run_config}). "
             "Re-run with --overwrite."
         )
 

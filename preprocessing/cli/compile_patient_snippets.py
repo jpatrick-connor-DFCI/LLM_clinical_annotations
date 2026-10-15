@@ -1,4 +1,4 @@
-"""Compile and persist the patient snippets consumed by the NEPC classifier."""
+"""Compile and persist the binary subtype classifier's patient snippets."""
 
 import argparse
 import sys
@@ -27,14 +27,14 @@ from preprocessing.notes import (  # noqa: E402
 from preprocessing.snippets import build_patient_snippets  # noqa: E402
 from preprocessing.triggers import TRIGGER_REGEX, combined_text_pattern  # noqa: E402
 
-_PROFILE = SNIPPET_PROFILES["binary_nepc"]
+_PROFILE = SNIPPET_PROFILES["binary_subtype"]
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Clean and trigger-scan prostate notes, rank patient snippets, and "
-            "save the standalone artifact required by tasks/binary_NEPC/run_NEPC_classifier.py."
+            "save the standalone artifact required by tasks/binary_subtype/run_NEPC_classifier.py."
         )
     )
     parser.add_argument(
@@ -89,8 +89,9 @@ def run(args):
     )
     if parquet_paths is not None and selected_mrns is None:
         raise ValueError(
-            "Binary NEPC is prostate-specific. Direct PROFILE_DATA parquet runs "
-            "require --mrns or --mrn-file to define the prostate cohort."
+            "Binary subtype classification is prostate-specific. Direct "
+            "PROFILE_DATA parquet runs require --mrns or --mrn-file to define "
+            "the prostate cohort."
         )
     source_label, source_path = resolve_note_source(
         parquet_paths=parquet_paths,

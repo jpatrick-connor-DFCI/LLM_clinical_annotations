@@ -12,11 +12,11 @@ pip install -e ".[dfci_gpt]"     # or ".[vertex_ai]"
 # Build the shared note source (required before most pipelines)
 python preprocessing/cli/compile_patient_snippets.py
 
-# Binary NEPC: compile snippets, then classify
+# Binary subtype: compile snippets, then classify
 python preprocessing/cli/compile_patient_snippets.py --output-path /path/to/patient_snippets.parquet
-python tasks/binary_NEPC/run_NEPC_classifier.py --snippets-path /path/to/patient_snippets.parquet --output-dir /path/to/out --provider dfci_gpt
+python tasks/binary_subtype/run_NEPC_classifier.py --snippets-path /path/to/patient_snippets.parquet --output-dir /path/to/out --provider dfci_gpt
 
-# Cancer stage / Gleason / longitudinal NEPC: collect evidence, then extract
+# Cancer stage / Gleason / longitudinal subtype: collect evidence, then extract
 python preprocessing/cli/extract_stage_notes.py --output-dir /path/to/out          # stage: scan (no LLM)
 python tasks/cancer_stage/run_stage_extraction.py --output-dir /path/to/out --provider vertex_ai
 
@@ -24,15 +24,7 @@ python preprocessing/cli/collect_gleason_notes.py --output-dir /path/to/out
 python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
-python tasks/longitudinal_NEPC/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
-
-# Strict NEPC diagnosis date only (precision-biased variant of the above)
-python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out
-python tasks/nepc_diagnosis/build_nepc_dx_labels.py --output-dir /path/to/out --provider dfci_gpt
-
-# Metastatic prostate cancer label + first-mention date
-python preprocessing/cli/collect_met_dx_notes.py --output-dir /path/to/out
-python tasks/met_diagnosis/build_met_dx_labels.py --output-dir /path/to/out --provider dfci_gpt
+python tasks/longitudinal_subtype/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
@@ -114,7 +106,7 @@ Every task is split into a **preprocessing** step and a **task runner**:
    calls the selected provider once per chunk via `ThreadPoolExecutor`, writes
    raw findings + a processed-patient log incrementally. `run_NEPC_classifier.py`
    resumes at **patient** granularity and supports `--retry-failures` to retry
-   only prior failures. Staging and binary NEPC also persist a run fingerprint;
+   only prior failures. Staging and binary subtype also persist a run fingerprint;
    changed evidence, model, prompt, payload sizing, or output schema requires
    `--overwrite` instead of silently mixing output generations.
 
@@ -122,10 +114,10 @@ Every task is split into a **preprocessing** step and a **task runner**:
    `avpc_nepc_processed_chunks.parquet` / `gleason_processed_chunks.parquet`, but
    they differ in how far a gap propagates. `gleason_score` resumes strictly per
    chunk: a patient whose chunk 2 failed re-runs only chunk 2, keeping the
-   findings the other chunks already produced. `longitudinal_NEPC` instead
+   findings the other chunks already produced. `longitudinal_subtype` instead
    compiles a patient history forward across its map calls — each chunk sees a
    deterministic digest of prior chunks' validated findings plus a short
-   LLM-written narrative (`tasks/longitudinal_NEPC/history.py`), so grounding
+   LLM-written narrative (`tasks/longitudinal_subtype/history.py`), so grounding
    still only accepts quotes from that chunk's own notes. Because that history
    depends on a consistent forward pass, its resume re-runs from the **first**
    outstanding chunk of a patient onward, not just the gap: a patient whose
@@ -133,46 +125,23 @@ Every task is split into a **preprocessing** step and a **task runner**:
    per-patient status as `ok` / `partial:N/M` / `failed:<err>`, and both record
    the evidence `scan_config` hash on each chunk row; a mismatch against the
    evidence sidecar raises instead of resuming onto chunks that no longer mean
-   the same thing. `longitudinal_NEPC`'s run fingerprint also includes
+   the same thing. `longitudinal_subtype`'s run fingerprint also includes
    `HISTORY_VERSION`, so changing how carried history is built or presented
    forces `--overwrite` rather than mixing chunks produced under two different
    history contracts.
 
-   `nepc_diagnosis` is the strict-precision variant of `longitudinal_NEPC`,
-   answering only "does the record state an NEPC diagnosis, and when?". It
-   shares the collector, chunking, and resume machinery but differs in four
-   ways: a narrowed trigger set (the `avpc`/`avpc_atomic` families are dropped);
-   a deterministic negation/hedge/assertion gate applied to every grounded quote
-   (`tasks/nepc_diagnosis/veto.py`), which the model cannot override; quote
-   grounding that requires source-date **equality** and rejects a provenance
-   mismatch rather than silently re-dating the finding to another note; and a
-   per-patient adjudication call producing one label row instead of a
-   multi-event timeline. Its run fingerprint includes `VETO_VERSION`, so
-   changing the gate requires `--overwrite` rather than mixing labels
-   adjudicated under two different gates. `nepc_dx_rejected_findings.parquet`
-   records every rejected finding with its reason and is the tuning signal for
-   the gate.
-
-   `met_diagnosis` answers "does the record establish metastatic prostate
-   cancer, and when was it first documented?", and is built on the same
-   strict-precision machinery as `nepc_diagnosis`: quote grounding with
-   source-date equality, a deterministic gate (`tasks/met_diagnosis/veto.py`)
-   hashed into the run fingerprint via `VETO_VERSION`, and a per-patient
-   adjudication producing one label row. Three things are specific to it. The
-   gate must separate M1 from N1 — regional pelvic nodal disease alone does not
-   qualify even though pathology writes it as "metastatic adenocarcinoma in 2 of
-   14 pelvic lymph nodes" — so it carries a whole-quote `regional_nodal_only`
-   check that the NEPC gate has no analogue for. A non-prostate organ near the
-   term is usually the metastatic *destination* rather than a competing primary,
-   the reverse of the NEPC case, so a site vetoes only alongside a
-   primary-attribution cue. And `met_site` (bone / visceral / distant_nodal /
-   unspecified) is validated against the grounded quote, which is what makes the
-   M1-vs-N1 call auditable. Because metastatic disease is rarely given an
-   explicit date in text, the earliest-qualifying-note-date path is the common
-   one rather than an edge case, and it spans every veto-passing candidate for
-   the patient rather than only those sharing the adjudicated finding's
-   `evidence_type` — the same fact is routinely first written by a radiologist
-   and only later restated by an oncologist.
+   Both subtype pipelines call AVPC only for castration-resistant, metastatic
+   prostate cancer meeting at least one of C1–C7. The two disease states are
+   extracted as findings of their own, and every grounded quote offered for one
+   must pass the deterministic gate in `tasks/longitudinal_subtype/mcrpc_gate.py`,
+   which the model cannot override. C2, C3 and C5 imply metastatic disease and
+   C7 implies castration resistance; C1 is exempt from castration resistance
+   but must still be metastatic. The metastatic screen defers to
+   `tasks/longitudinal_subtype/met_veto.py`, which separates M1 from N1:
+   regional pelvic nodal disease alone does not qualify even though pathology
+   writes it as "metastatic adenocarcinoma in 2 of 14 pelvic lymph nodes". Both
+   run fingerprints hash `GATE_VERSION` and the met veto's `VETO_VERSION`, so
+   changing either gate requires `--overwrite`.
 
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.
@@ -191,9 +160,9 @@ remains pan-cancer unless an MRN restriction is supplied.
 `preprocessing/config.py` defines `SnippetProfile(context_chars, max_chars,
 payload_max_chars)` and `SNIPPET_PROFILES`:
 
-- `"binary_nepc"` — one LLM call per patient; tight per-trigger context, no
+- `"binary_subtype"` — one LLM call per patient; tight per-trigger context, no
   real per-note cap, one big per-patient payload budget (300k chars).
-- `"longitudinal"` — used by cancer_stage, gleason_score, longitudinal_NEPC;
+- `"longitudinal"` — used by cancer_stage, gleason_score, longitudinal_subtype;
   wider per-trigger context (needed to date events), a real per-note cap, and
   a smaller per-chunk payload budget (60k chars) so patients with many notes
   get multiple LLM calls instead of one truncated call.

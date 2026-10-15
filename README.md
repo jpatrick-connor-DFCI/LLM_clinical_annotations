@@ -1,10 +1,9 @@
 # LLM clinical annotations
 
-LLM-based extraction of structured clinical annotations (NEPC status, pan-cancer
-stage, Gleason score, AVPC/NEPC criteria timelines, metastatic disease status and
-date) from merged PROFILE_DATA
-clinical-note parquets, runnable against either DFCI Azure OpenAI or Google
-Vertex AI (Gemini) as the LLM backend.
+LLM-based extraction of structured clinical annotations (prostate cancer
+subtype, pan-cancer stage, Gleason score, AVPC/NEPC criteria timelines) from
+merged PROFILE_DATA clinical-note parquets, runnable against either DFCI Azure
+OpenAI or Google Vertex AI (Gemini) as the LLM backend.
 
 ## Layout
 
@@ -24,12 +23,11 @@ providers/          Thin adapters over each LLM backend behind one interface
 
 tasks/              One directory per extraction task, each with a system
                     prompt and a runner that takes --provider {dfci_gpt,vertex_ai}.
-  binary_NEPC/       NEPC vs. adenocarcinoma classification.
-  cancer_stage/      Cancer stage timeline extraction.
-  gleason_score/     Gleason score / grade group timeline extraction.
-  longitudinal_NEPC/ AVPC (Aparicio criteria) / NEPC feature timeline extraction.
-  nepc_diagnosis/    Strict NEPC diagnosis label + date (precision-biased).
-  met_diagnosis/     Metastatic prostate cancer label + first-mention date.
+  binary_subtype/        Patient-level prostate cancer subtype (NEPC / AVPC /
+                         biomarker / conventional) classification.
+  cancer_stage/          Cancer stage timeline extraction.
+  gleason_score/         Gleason score / grade group timeline extraction.
+  longitudinal_subtype/  AVPC (Aparicio criteria) / NEPC feature timelines.
 
 notebooks/          One notebook per task with a PROVIDER toggle. Each notebook
                     subprocess-calls the preprocessing CLIs, then the task's
@@ -65,12 +63,12 @@ python preprocessing/cli/compile_patient_snippets.py \
     --output-path /path/to/snippets.parquet
 
 # 2. Task runner (provider-flagged)
-python tasks/binary_NEPC/run_NEPC_classifier.py \
+python tasks/binary_subtype/run_NEPC_classifier.py \
     --snippets-path /path/to/snippets.parquet \
     --provider dfci_gpt   # or vertex_ai
 ```
 
-Binary NEPC deterministically repairs harmless schema drift (such as a scalar
+Binary subtype deterministically repairs harmless schema drift (such as a scalar
 returned instead of a one-item list or a grounded quote paired with the wrong
 note date). Malformed, ungrounded, inconsistent, or truncated responses receive
 up to two corrective calls before the patient is written to the failure
@@ -78,15 +76,16 @@ Parquet; configure this with `--max-output-correction-retries`.
 
 Every preprocessing CLI and task runner supports `--help`.
 
-The binary NEPC, Gleason, and longitudinal AVPC/NEPC collectors are
+The binary subtype, Gleason, and longitudinal subtype collectors are
 prostate-specific. Their default cohort is
 `$COMPASS_PATH/mrn_lists/adt_mrns.csv`; `--mrns` or
 `--mrn-file` can override it. Only the cancer-stage collector defaults to the
 full pan-cancer cohort.
 
-### Longitudinal AVPC/NEPC
+### Longitudinal subtype
 
-The longitudinal AVPC/NEPC runner uses a map/reduce extraction:
+The longitudinal subtype runner uses a map/reduce extraction of AVPC/NEPC
+criteria:
 
 1. `collect_nepc_notes.py` writes content-hashed evidence chunks.
 2. `build_nepc_timeline.py` maps each chunk into validated atomic evidence.
@@ -109,7 +108,7 @@ Grounded items that fail validation are quarantined in
 python preprocessing/cli/collect_nepc_notes.py \
     --output-dir /path/to/avpc_nepc
 
-python tasks/longitudinal_NEPC/build_nepc_timeline.py \
+python tasks/longitudinal_subtype/build_nepc_timeline.py \
     --output-dir /path/to/avpc_nepc \
     --provider vertex_ai
 ```
@@ -150,6 +149,7 @@ The native PROFILE text rows are consumed exactly as emitted by
 Upstream processing has already merged `NARRATIVE_TEXT` into `RPT_TEXT`, so the
 loader treats `RPT_TEXT` as the complete canonical note body.
 
-Staging and binary NEPC resume state is fingerprinted against evidence/snippet
-content, provider, model, prompts, and output schemas. Binary output uses
-`review_status` to distinguish `llm_classified`, `no_trigger`, and `no_notes`.
+Staging and binary subtype resume state is fingerprinted against
+evidence/snippet content, provider, model, prompts, and output schemas. Binary
+output uses `review_status` to distinguish `llm_classified`, `no_trigger`, and
+`no_notes`.

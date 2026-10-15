@@ -1,13 +1,14 @@
-"""Deterministic quote-level gate for the metastatic prostate cancer task.
+"""Deterministic quote-level gate for metastatic prostate cancer.
 
 Applied AFTER the quote is grounded in evidence, and the model cannot override
 it. Precision is the objective here: an ambiguous quote is rejected, and a
 rejection costs one finding rather than the patient's whole result.
+`mcrpc_gate.screen_metastatic_quote` defers to `screen_quote` for the
+metastatic disease state that AVPC presupposes.
 
-This is the sibling of tasks/nepc_diagnosis/veto.py and keeps its shape --
-flatten, require a term, require an assertion anchor, then require EVERY term
-occurrence to survive a set of windowed checks. Three things differ, and each
-is a place where copying the NEPC gate verbatim would be wrong:
+The shape is: flatten, require a term, require an assertion anchor, then
+require EVERY term occurrence to survive a set of windowed checks. Three
+properties of metastasis language drive those checks:
 
   1. Negation is the dominant case, not an edge case. The single most common
      metastasis sentence in this corpus is "no evidence of metastatic disease",
@@ -17,21 +18,20 @@ is a place where copying the NEPC gate verbatim would be wrong:
      (degenerative, benign, bone island, age-related, postsurgical).
 
   2. A non-prostate site near the term is usually a DESTINATION, not a primary.
-     In the NEPC task "small cell carcinoma of the lung" always meant a lung
-     primary, so any nearby site was disqualifying. Here "metastatic prostate
-     cancer to the lung" is precisely the finding we want. The site check
-     therefore fires only when the site reads as the primary
+     "Metastatic prostate cancer to the lung" is precisely the finding we
+     want, so the site check fires only when the site reads as the primary
      (NON_PROSTATE_PRIMARY_CUE) rather than merely appearing nearby.
 
-  3. Regional pelvic nodal disease is N1, not M1, and is excluded by the task
-     definition -- but it is written with the word "metastatic" ("metastatic
-     adenocarcinoma in 2 of 14 pelvic lymph nodes"). This needs a check the
-     NEPC gate has no analogue for, and it is a property of the quote's whole
-     site set rather than of one term occurrence, so it runs after the loop.
+  3. Regional pelvic nodal disease is N1, not M1, and does not make a patient
+     metastatic -- but it is written with the word "metastatic" ("metastatic
+     adenocarcinoma in 2 of 14 pelvic lymph nodes"). This is a property of the
+     quote's whole site set rather than of one term occurrence, so it runs
+     after the loop.
 
-Bump VETO_VERSION on any change to the patterns or windows. The stage-2 run
-fingerprint hashes it, so a changed gate forces --overwrite instead of silently
-mixing labels adjudicated under two different gates.
+Bump VETO_VERSION on any change to the patterns or windows. The binary and
+longitudinal subtype run fingerprints hash it (as mcrpc_gate.MET_VETO_VERSION),
+so a changed gate forces --overwrite instead of silently mixing outputs
+screened by two different gates.
 """
 
 import re
@@ -79,8 +79,8 @@ ASSERTION_ANCHOR = re.compile(
 # each term, never across the whole quote -- a whole-quote scan would veto
 # "IMPRESSION: osseous metastases; no evidence of visceral disease".
 #
-# Extended beyond the NEPC gate with radiology-specific alternatives that negate
-# malignancy without negating the noun: a sclerotic focus called "degenerative"
+# Includes radiology-specific alternatives that negate malignancy without
+# negating the noun: a sclerotic focus called "degenerative"
 # or "a bone island" is an explicit statement that the lesion is NOT a
 # metastasis. "Resolved"/"no new" likewise describe absence at this timepoint.
 NEGATION_HEDGE = re.compile(
@@ -131,8 +131,8 @@ POST_NEGATION = re.compile(
 # worth its own pattern so its rejections are legible in the histogram.
 NEGATIVE_FOR = re.compile(r"\bnegative\s+for\b", flags=re.IGNORECASE)
 
-# Non-prostate primary sites. Unlike the NEPC gate, a bare site near the term is
-# NOT disqualifying here -- it is usually the metastatic destination. The site
+# Non-prostate primary sites. A bare site near the term is NOT disqualifying
+# -- it is usually the metastatic destination. The site
 # vetoes only when a primary-attribution cue sits next to it.
 NON_PROSTATE_SITE = re.compile(
     r"\b(?:lung|pulmonary|bronch\w*|bladder|urothelial|"
@@ -216,8 +216,8 @@ POST_WINDOW_CHARS = 40
 def _is_non_prostate_primary(window):
     """True when a non-prostate site in `window` reads as the PRIMARY cancer.
 
-    A site alone is not enough -- in this task the site is usually the
-    metastatic destination. It disqualifies only when an attribution cue
+    A site alone is not enough -- the site is usually the metastatic
+    destination. It disqualifies only when an attribution cue
     ("known", "primary", "history of", "carcinoma") sits within a short window
     of the site itself.
     """
@@ -306,7 +306,7 @@ def screen_quote(quote):
         if boiler is not None:
             return False, f"boilerplate:{boiler.group(0).lower()}"
     # Whole-quote check: N1 disease is written with the word "metastatic" but is
-    # not M1, and the task definition excludes it.
+    # not M1, so on its own it does not establish metastatic disease.
     if _is_regional_nodal_only(text):
         return False, "regional_nodal_only"
     return True, None

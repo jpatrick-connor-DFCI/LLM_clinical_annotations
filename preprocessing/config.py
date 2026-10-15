@@ -112,19 +112,17 @@ SNIPPET_GAP_CHARS = 300
 # in a way that makes older Parquet evidence unsafe to resume (trigger coverage, cohort
 # requirements, or chunk assignment rules).
 GLEASON_EVIDENCE_SCHEMA_VERSION = "gleason-evidence-parquet-v3"
-LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION = "avpc-nepc-evidence-parquet-v3"
-NEPC_DX_EVIDENCE_SCHEMA_VERSION = "nepc-dx-evidence-parquet-v1"
-MET_DX_EVIDENCE_SCHEMA_VERSION = "met-dx-evidence-parquet-v1"
+LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION = "avpc-nepc-evidence-parquet-v3"
 
 
 @dataclass(frozen=True)
 class SnippetProfile:
     """Per-note/per-payload sizing knobs. Values differ by task shape.
 
-    binary_nepc makes one LLM call per patient and wants tight context windows
+    binary_subtype makes one LLM call per patient and wants tight context windows
     around each trigger with effectively no per-note cap (the per-patient
     payload cap is the only real ceiling). The longitudinal tasks (stage,
-    gleason, longitudinal_NEPC) pack many notes into each call, so they need
+    gleason, longitudinal_subtype) pack many notes into each call, so they need
     wider per-trigger context to date events but a real per-note cap and a
     smaller per-chunk payload budget.
     """
@@ -140,7 +138,7 @@ SNIPPET_PROFILES = {
     # Payload cap: 128k-token models at ~4 chars/token give ~500k input chars;
     # budget ~300k for snippets to leave room for the system prompt, JSON
     # scaffolding, and output.
-    "binary_nepc": SnippetProfile(context_chars=750, max_chars=300_000, payload_max_chars=300_000),
+    "binary_subtype": SnippetProfile(context_chars=750, max_chars=300_000, payload_max_chars=300_000),
     # Wider context per trigger for event dating; real per-note cap; chunk at
     # 60k chars (~15k tokens) per LLM call so patients with many notes get
     # multiple calls instead of truncation.

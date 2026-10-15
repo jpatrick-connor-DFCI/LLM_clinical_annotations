@@ -1,4 +1,4 @@
-"""Persistence for the binary NEPC patient-snippet Parquet artifact."""
+"""Persistence for the binary subtype patient-snippet Parquet artifact."""
 
 import json
 from datetime import datetime, timezone

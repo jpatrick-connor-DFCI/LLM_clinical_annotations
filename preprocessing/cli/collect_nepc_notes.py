@@ -32,7 +32,7 @@ from preprocessing.config import (  # noqa: E402
     DEFAULT_DATA_PATH,
     DEFAULT_ADT_MRN_CSV,
     DEFAULT_PROFILE_NOTE_PATHS,
-    LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+    LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
     SNIPPET_PROFILES,
 )
 from preprocessing.longitudinal import (  # noqa: E402
@@ -53,7 +53,7 @@ from preprocessing.triggers import (  # noqa: E402
 DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_avpc_nepc_timeline"
 _PROFILE = SNIPPET_PROFILES["longitudinal"]
 
-# Reuse the NEPC classifier's nepc + avpc trigger regexes to collect notes.
+# Collect notes with the binary subtype classifier's nepc + avpc triggers.
 TRIGGER_REGEX = {
     key: _SHARED_TRIGGER_REGEX[key] for key in ("nepc", "avpc")
 }
@@ -165,7 +165,7 @@ def run(args):
     direct_parquet = args.note_bundle_path is None
     if direct_parquet and selected_mrns is None:
         raise ValueError(
-            "Longitudinal AVPC/NEPC extraction is prostate-specific. Direct "
+            "Longitudinal subtype extraction is prostate-specific. Direct "
             "PROFILE_DATA parquet runs require --mrns or --mrn-file to define "
             "the prostate cohort."
         )
@@ -213,7 +213,7 @@ def run(args):
             )
         if (
             existing_meta.get("evidence_schema_version")
-            != LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
+            != LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION
         ):
             raise ValueError(
                 "Existing AVPC/NEPC evidence predates the current trigger/cohort "
@@ -286,7 +286,7 @@ def run(args):
         payload_max_chars=args.payload_max_chars,
         note_types=args.note_types,
         evidence_sha256=file_sha256(evidence_path),
-        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+        evidence_schema_version=LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
         cohort_mrn_count=len(selected_mrns) if selected_mrns is not None else None,
         # Preserve the actual denominator, not only its size, so stage 2 can
         # materialize explicit auto-conventional rows for cohort patients who

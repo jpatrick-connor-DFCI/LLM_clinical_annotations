@@ -449,8 +449,8 @@
     <div class="eyebrow">LLM clinical annotations</div>
     <h1>Four pipelines, from clinical notes to auditable annotations</h1>
     <p>
-      A code-derived overview of the binary NEPC classifier, longitudinal AVPC/NEPC
-      timeline, pan-cancer stage timeline, and Gleason timeline. This document covers
+      A code-derived overview of the binary subtype classifier, longitudinal subtype
+      (AVPC/NEPC) timeline, pan-cancer stage timeline, and Gleason timeline. This document covers
       the complete data path: source selection, cohort constraints, trigger scanning,
       evidence construction, LLM extraction, validation, resumability, and final files.
     </p>
@@ -467,8 +467,8 @@
     <div class="topnav-inner">
       <a href="#at-a-glance">At a glance</a>
       <a href="#shared-foundation">Shared foundation</a>
-      <a href="#binary-nepc">Binary NEPC</a>
-      <a href="#longitudinal-nepc">Longitudinal AVPC/NEPC</a>
+      <a href="#binary-subtype">Binary subtype</a>
+      <a href="#longitudinal-subtype">Longitudinal subtype</a>
       <a href="#cancer-stage">Cancer stage</a>
       <a href="#gleason">Gleason</a>
       <a href="#operations">Operations</a>
@@ -510,14 +510,14 @@
           </thead>
           <tbody>
             <tr>
-              <td><a href="#binary-nepc">Binary NEPC</a></td>
+              <td><a href="#binary-subtype">Binary subtype</a></td>
               <td>Prostate-specific; defaults to the COMPASS ADT cohort</td>
               <td>Combined NEPC, AVPC, biomarker, and second-primary triggers; ranked/capped snippets</td>
               <td>One call per triggered patient</td>
               <td>One classification row per cohort patient</td>
             </tr>
             <tr>
-              <td><a href="#longitudinal-nepc">Longitudinal AVPC/NEPC</a></td>
+              <td><a href="#longitudinal-subtype">Longitudinal subtype</a></td>
               <td>Prostate-specific; defaults to the COMPASS ADT cohort</td>
               <td>NEPC/AVPC triggers plus atomic facts needed for composite Aparicio criteria</td>
               <td>Map call per chunk + synthesis call per patient</td>
@@ -684,11 +684,11 @@
       </div>
     </section>
 
-    <article id="binary-nepc" class="pipeline binary">
+    <article id="binary-subtype" class="pipeline binary">
       <div class="pipeline-banner">
         <div>
           <span class="pipeline-id">Pipeline 01 · patient classifier</span>
-          <h2>Binary NEPC classification</h2>
+          <h2>Binary subtype classification</h2>
           <p>
             Assigns one primary prostate-cancer phenotype per cohort patient while also
             retaining independent AVPC, molecular AVPC, biomarker, and non-prostate-primary
@@ -696,9 +696,9 @@
           </p>
         </div>
         <div class="pipeline-facts">
-          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/binary_NEPC.ipynb">binary_NEPC.ipynb</a></span></div>
+          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/binary_subtype.ipynb">binary_subtype.ipynb</a></span></div>
           <div class="fact-row"><b>Collector</b><span><a href="preprocessing/cli/compile_patient_snippets.py">compile_patient_snippets.py</a></span></div>
-          <div class="fact-row"><b>Runner</b><span><a href="tasks/binary_NEPC/run_NEPC_classifier.py">run_NEPC_classifier.py</a></span></div>
+          <div class="fact-row"><b>Runner</b><span><a href="tasks/binary_subtype/run_NEPC_classifier.py">run_NEPC_classifier.py</a></span></div>
           <div class="fact-row"><b>Call unit</b><span>1 triggered patient</span></div>
           <div class="fact-row"><b>Resume unit</b><span>Patient</span></div>
         </div>
@@ -814,11 +814,11 @@
       </div>
     </article>
 
-    <article id="longitudinal-nepc" class="pipeline long-nepc">
+    <article id="longitudinal-subtype" class="pipeline long-nepc">
       <div class="pipeline-banner">
         <div>
           <span class="pipeline-id">Pipeline 02 · map/reduce timeline</span>
-          <h2>Longitudinal AVPC/NEPC</h2>
+          <h2>Longitudinal subtype</h2>
           <p>
             Builds the earliest supported onset of every canonical Aparicio AVPC criterion
             and independent NEPC sub-feature. Chunk-level mapping preserves atomic facts;
@@ -827,9 +827,9 @@
           </p>
         </div>
         <div class="pipeline-facts">
-          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/longitudinal_NEPC.ipynb">longitudinal_NEPC.ipynb</a></span></div>
+          <div class="fact-row"><b>Notebook</b><span><a href="notebooks/longitudinal_subtype.ipynb">longitudinal_subtype.ipynb</a></span></div>
           <div class="fact-row"><b>Collector</b><span><a href="preprocessing/cli/collect_nepc_notes.py">collect_nepc_notes.py</a></span></div>
-          <div class="fact-row"><b>Runner</b><span><a href="tasks/longitudinal_NEPC/build_nepc_timeline.py">build_nepc_timeline.py</a></span></div>
+          <div class="fact-row"><b>Runner</b><span><a href="tasks/longitudinal_subtype/build_nepc_timeline.py">build_nepc_timeline.py</a></span></div>
           <div class="fact-row"><b>Call unit</b><span>Chunk map + patient reduce</span></div>
           <div class="fact-row"><b>Resume unit</b><span>Chunk map and patient synthesis</span></div>
         </div>
@@ -1194,8 +1194,8 @@
           <table>
             <thead><tr><th>Pipeline</th><th>Context / snippet / payload</th><th>Evidence dedup</th><th>Failure recovery</th></tr></thead>
             <tbody>
-              <tr><td>Binary NEPC</td><td>750 / 300k / 300k chars; max 75 notes</td><td>Ranked candidates; no longitudinal copy-forward collapse</td><td>Patient failure Parquet; explicit <code>--retry-failures</code></td></tr>
-              <tr><td>Longitudinal AVPC/NEPC</td><td>2,000 / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Retry failed chunks; synthesize after complete map</td></tr>
+              <tr><td>Binary subtype</td><td>750 / 300k / 300k chars; max 75 notes</td><td>Ranked candidates; no longitudinal copy-forward collapse</td><td>Patient failure Parquet; explicit <code>--retry-failures</code></td></tr>
+              <tr><td>Longitudinal subtype</td><td>2,000 / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Retry failed chunks; synthesize after complete map</td></tr>
               <tr><td>Cancer stage</td><td>Collector CLI 600 (notebook 6,000) / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Patient rerun unless processed status is <code>ok</code></td></tr>
               <tr><td>Gleason</td><td>600 / 30k / 60k chars</td><td>Identical snippets collapse to earliest date</td><td>Retry only failed/missing chunks</td></tr>
             </tbody>
@@ -1206,24 +1206,24 @@
       <div class="subsection">
         <div class="subsection-title"><h3>Minimal command sequences</h3></div>
         <details open>
-          <summary>Binary NEPC</summary>
+          <summary>Binary subtype</summary>
           <div class="details-body">
 <pre><code>python preprocessing/cli/compile_patient_snippets.py \
   --output-path /path/to/LLM_NEPC_classifier_patient_snippets.parquet
 
-python tasks/binary_NEPC/run_NEPC_classifier.py \
+python tasks/binary_subtype/run_NEPC_classifier.py \
   --snippets-path /path/to/LLM_NEPC_classifier_patient_snippets.parquet \
   --output-dir /path/to/LLM_NEPC_labels \
   --provider vertex_ai</code></pre>
           </div>
         </details>
         <details>
-          <summary>Longitudinal AVPC/NEPC</summary>
+          <summary>Longitudinal subtype</summary>
           <div class="details-body">
 <pre><code>python preprocessing/cli/collect_nepc_notes.py \
   --output-dir /path/to/LLM_avpc_nepc_timeline
 
-python tasks/longitudinal_NEPC/build_nepc_timeline.py \
+python tasks/longitudinal_subtype/build_nepc_timeline.py \
   --output-dir /path/to/LLM_avpc_nepc_timeline \
   --provider vertex_ai</code></pre>
           </div>
@@ -1307,8 +1307,8 @@ python tasks/gleason_score/build_gleason_timeline.py \
             <tr><td><a href="preprocessing/longitudinal.py"><code>preprocessing/longitudinal.py</code></a></td><td>Copy-forward deduplication, stable chunk packing, scan fingerprints, date resolution, Grade Group derivation.</td></tr>
             <tr><td><a href="preprocessing/grounding.py"><code>preprocessing/grounding.py</code></a></td><td>Quote normalization and source-note/date grounding.</td></tr>
             <tr><td><a href="providers/"><code>providers/</code></a></td><td>Provider registry, retry adapters, and shared JSON response parsing.</td></tr>
-            <tr><td><a href="tasks/binary_NEPC/"><code>tasks/binary_NEPC/</code></a></td><td>Classifier prompt, validation, cohort status logic, outputs, failure retry, run fingerprint.</td></tr>
-            <tr><td><a href="tasks/longitudinal_NEPC/"><code>tasks/longitudinal_NEPC/</code></a></td><td>Canonical criteria, map/reduce prompts, per-item validation, quarantine, and cumulative timeline.</td></tr>
+            <tr><td><a href="tasks/binary_subtype/"><code>tasks/binary_subtype/</code></a></td><td>Classifier prompt, validation, cohort status logic, outputs, failure retry, run fingerprint.</td></tr>
+            <tr><td><a href="tasks/longitudinal_subtype/"><code>tasks/longitudinal_subtype/</code></a></td><td>Canonical criteria, map/reduce prompts, per-item validation, quarantine, and cumulative timeline.</td></tr>
             <tr><td><a href="tasks/cancer_stage/"><code>tasks/cancer_stage/</code></a></td><td>Stage extraction prompt, schema/grounding validation, raw events and stage-change timeline.</td></tr>
             <tr><td><a href="tasks/gleason_score/"><code>tasks/gleason_score/</code></a></td><td>Gleason extraction prompt, numeric/date validation, chunk resume, Grade Group timeline.</td></tr>
           </tbody>

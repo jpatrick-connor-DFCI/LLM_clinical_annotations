@@ -1,9 +1,10 @@
 """Shared plumbing for the longitudinal, patient-chunked LLM extraction pipelines.
 
 All four pipelines (Gleason timeline, AVPC/NEPC criteria timeline, cancer stage,
-binary NEPC) collect trigger-bearing notes and snippet them via `preprocessing`;
-the longitudinal pipelines additionally de-duplicate per patient and pack
-snippets into one or more payload-sized chunks for a single LLM call per chunk.
+binary subtype) collect trigger-bearing notes and snippet them via
+`preprocessing`; the longitudinal pipelines additionally de-duplicate per
+patient and pack snippets into one or more payload-sized chunks for a single
+LLM call per chunk.
 """
 
 import hashlib
@@ -69,7 +70,7 @@ def _candidate_to_record(candidate):
     """Convert a scan_note_candidates() candidate into the record shape dedupe/pack expect.
 
     scan_note_candidates (preprocessing/snippets.py) is the ProcessPoolExecutor-parallel
-    per-note scan shared with the binary_nepc path; its candidates carry `mrn`/`raw_note_id`
+    per-note scan shared with the binary_subtype path; its candidates carry `mrn`/`raw_note_id`
     instead of `DFCI_MRN`/`note_uid`, so this adapts field names rather than duplicating
     the scan logic.
     """

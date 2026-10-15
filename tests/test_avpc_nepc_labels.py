@@ -1,8 +1,8 @@
 import polars as pl
 import pytest
 
-from tasks.longitudinal_NEPC.build_nepc_timeline import TIMELINE_COLUMNS
-from tasks.longitudinal_NEPC import build_avpc_nepc_labels as labels
+from tasks.longitudinal_subtype.build_nepc_timeline import TIMELINE_COLUMNS
+from tasks.longitudinal_subtype import build_avpc_nepc_labels as labels
 
 MET = "STATE:metastatic"
 CR = "STATE:castration_resistant"

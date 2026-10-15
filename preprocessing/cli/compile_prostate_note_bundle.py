@@ -24,7 +24,7 @@ from preprocessing.notes import (  # noqa: E402
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Compile prostate notes for a prostate MRN list into a Parquet bundle "
-        "for binary_NEPC. Defaults to reading the merged PROFILE_DATA note parquets."
+        "for binary_subtype. Defaults to reading the merged PROFILE_DATA note parquets."
     )
     parser.add_argument(
         "--output-path",

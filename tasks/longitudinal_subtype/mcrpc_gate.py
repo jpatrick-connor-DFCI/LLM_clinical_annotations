@@ -14,12 +14,13 @@ small-cell carcinoma (C1) from castration resistance, though it must still be
 metastatic. Label builders combine these with the states; this module only
 screens quotes and names the implying criteria.
 
-Both screens follow the met_diagnosis gate's conventions: flatten whitespace,
-require EVERY term occurrence to survive bounded negation/hedge and boilerplate
-windows, and return stable reason strings for the rejected-findings audit.
+Both screens follow the met gate's (`met_veto.py`) conventions: flatten
+whitespace, require EVERY term occurrence to survive bounded negation/hedge and
+boilerplate windows, and return stable reason strings for the rejected-findings
+audit.
 
 - `screen_metastatic_quote` expands mCRPC/mHSPC/mCSPC, which the met gate's
-  term set lacks, and then defers to `tasks.met_diagnosis.veto.screen_quote`.
+  term set lacks, and then defers to `met_veto.screen_quote`.
   Its M1-vs-N1 check therefore applies here too, so regional pelvic nodes
   alone do not make a patient metastatic. "nmCRPC" expands to
   "non-metastatic ..." and that gate's "non" cue rejects it, as intended.
@@ -38,7 +39,7 @@ gate forces --overwrite instead of mixing outputs screened by two gates.
 
 import re
 
-from tasks.met_diagnosis.veto import (
+from tasks.longitudinal_subtype.met_veto import (
     BOILERPLATE,
     BOILERPLATE_WINDOW_CHARS,
     NEGATION_WINDOW_CHARS,
@@ -48,7 +49,7 @@ from tasks.met_diagnosis.veto import (
 )
 # Re-exported: screen_metastatic_quote defers to the met gate, so the run
 # fingerprints import its version from here alongside GATE_VERSION.
-from tasks.met_diagnosis.veto import VETO_VERSION as MET_VETO_VERSION  # noqa: F401
+from tasks.longitudinal_subtype.met_veto import VETO_VERSION as MET_VETO_VERSION  # noqa: F401
 
 GATE_VERSION = "mcrpc-gate-v1"
 
@@ -183,7 +184,7 @@ def _expand_disease_acronyms(text):
 def screen_metastatic_quote(quote):
     """Return ``(ok, reason)``: does the quote assert distant metastatic disease?
 
-    Reasons are the met_diagnosis gate's: ``no_met_term`` /
+    Reasons are the met gate's: ``no_met_term`` /
     ``no_metastatic_assertion`` / ``negated_or_hedged:<cue>`` /
     ``regional_nodal_only`` / ``non_prostate_primary:<cue>`` /
     ``boilerplate:<cue>``.

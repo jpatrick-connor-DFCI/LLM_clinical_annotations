@@ -4,16 +4,16 @@ from argparse import Namespace
 import polars as pl
 import pytest
 
-from preprocessing.config import LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
+from preprocessing.config import LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION
 from preprocessing.longitudinal import file_sha256, group_patient_snippets, write_scan_config_meta
 from preprocessing.triggers import TRIGGER_REGEX, find_trigger_matches
-from tasks.longitudinal_NEPC import build_avpc_nepc_labels as labels
-from tasks.longitudinal_NEPC import build_nepc_timeline as nepc
-from tasks.longitudinal_NEPC.history import (
+from tasks.longitudinal_subtype import build_avpc_nepc_labels as labels
+from tasks.longitudinal_subtype import build_nepc_timeline as nepc
+from tasks.longitudinal_subtype.history import (
     build_history_context,
     normalize_history_summary,
 )
-from tasks.longitudinal_NEPC.prompts import (
+from tasks.longitudinal_subtype.prompts import (
     NEPC_SYNTHESIS_PROMPT,
     NEPC_SYSTEM_PROMPT,
 )
@@ -738,7 +738,7 @@ def test_end_to_end_resume_and_model_guard(tmp_path, monkeypatch):
         meta,
         "scan-1",
         evidence_sha256=file_sha256(evidence),
-        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+        evidence_schema_version=LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
     )
 
     class Provider:
@@ -858,7 +858,7 @@ def test_dropped_findings_are_counted_in_the_processed_log(tmp_path, monkeypatch
         meta,
         "scan-1",
         evidence_sha256=file_sha256(evidence),
-        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+        evidence_schema_version=LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
     )
 
     class Provider:
@@ -944,7 +944,7 @@ def test_disease_states_alone_keep_the_patient_conventional(tmp_path, monkeypatc
         meta,
         "scan-1",
         evidence_sha256=file_sha256(evidence),
-        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+        evidence_schema_version=LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
     )
     states = [
         _finding(state, quote, "2021-06-03", None)
@@ -1396,7 +1396,7 @@ def test_resume_reruns_every_chunk_after_the_first_gap(tmp_path, monkeypatch):
         meta,
         "scan-1",
         evidence_sha256=file_sha256(evidence),
-        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+        evidence_schema_version=LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
     )
 
     class Provider:

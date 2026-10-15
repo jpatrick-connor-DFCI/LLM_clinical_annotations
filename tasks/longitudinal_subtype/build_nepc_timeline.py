@@ -39,7 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 from preprocessing.config import (  # noqa: E402
     CLINICAL_SAFETY_CONTEXT,
     DEFAULT_DATA_PATH,
-    LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+    LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION,
 )
 from preprocessing.longitudinal import (  # noqa: E402
     flatten_ws,
@@ -55,17 +55,17 @@ from preprocessing.parquet_io import (  # noqa: E402
 )
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
-from tasks.longitudinal_NEPC.history import (  # noqa: E402
+from tasks.longitudinal_subtype.history import (  # noqa: E402
     HISTORY_VERSION,
     build_history_context,
     normalize_history_summary,
 )
-from tasks.longitudinal_NEPC.mcrpc_gate import (  # noqa: E402
+from tasks.longitudinal_subtype.mcrpc_gate import (  # noqa: E402
     GATE_VERSION,
     MET_VETO_VERSION,
     STATE_SCREENS,
 )
-from tasks.longitudinal_NEPC.prompts import (  # noqa: E402
+from tasks.longitudinal_subtype.prompts import (  # noqa: E402
     NEPC_SYNTHESIS_PROMPT,
     NEPC_SYSTEM_PROMPT,
     PROMPT_SCHEMA_VERSION,
@@ -395,7 +395,7 @@ def extraction_run_config(scan_config, provider_name, model):
     force --overwrite rather than mixing chunks produced under two different
     history contracts. GATE_VERSION and MET_VETO_VERSION are included for the
     same reason: they decide which disease-state findings survive validation,
-    and the metastatic screen reuses the met_diagnosis veto.
+    and the metastatic screen defers to the met veto (met_veto.py).
     """
     payload = {
         "schema": PROMPT_SCHEMA_VERSION,
@@ -431,7 +431,7 @@ def check_resume_config(
         )
     if (
         meta.get("evidence_schema_version")
-        != LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
+        != LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION
     ):
         raise ValueError(
             "AVPC/NEPC evidence predates the current trigger/cohort contract. "

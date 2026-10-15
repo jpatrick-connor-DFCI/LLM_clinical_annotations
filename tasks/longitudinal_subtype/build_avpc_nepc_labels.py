@@ -37,13 +37,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.parquet_io import write_rows_atomic  # noqa: E402
-from tasks.longitudinal_NEPC.build_nepc_timeline import (  # noqa: E402
+from tasks.longitudinal_subtype.build_nepc_timeline import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
     STATE_KEYS,
     TIMELINE_COLUMNS,
     VALID_CRITERIA,
 )
-from tasks.longitudinal_NEPC.mcrpc_gate import (  # noqa: E402
+from tasks.longitudinal_subtype.mcrpc_gate import (  # noqa: E402
     CASTRATION_EXEMPT_CRITERIA,
     CASTRATION_RESISTANT,
     CASTRATION_RESISTANT_CRITERIA,
@@ -410,9 +410,8 @@ def _print_summary(rows, n_demoted):
         if source_counts.get("note_date"):
             print(
                 "  NOTE: date_source == 'note_date' means earliest "
-                "*documentation*, not onset -- this is more common here than "
-                "in the strict nepc_dx_labels endpoint, since per-criterion "
-                "mentions rarely carry a stated onset date."
+                "*documentation*, not onset -- common here, since "
+                "per-criterion mentions rarely carry a stated onset date."
             )
 
 

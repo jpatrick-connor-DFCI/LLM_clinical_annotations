@@ -4,8 +4,8 @@ import polars as pl
 
 from preprocessing.bundles.snippet_bundle import load_snippet_bundle
 from preprocessing.cli.compile_patient_snippets import run as compile_snippets
-from tasks.binary_NEPC import run_NEPC_classifier
-from tasks.binary_NEPC.run_NEPC_classifier import (
+from tasks.binary_subtype import run_NEPC_classifier
+from tasks.binary_subtype.run_NEPC_classifier import (
     _run_fingerprint,
     conventional_row,
     no_notes_row,

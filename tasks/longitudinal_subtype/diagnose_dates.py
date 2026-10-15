@@ -1,4 +1,4 @@
-"""Read-only diagnostic for the longitudinal_NEPC date-reproducibility bug (Phase 2).
+"""Read-only diagnostic for the longitudinal_subtype date-reproducibility bug (Phase 2).
 
 Reads avpc_nepc_extractions_raw.parquet / avpc_nepc_timeline.parquet from an existing
 --output-dir and reports statistics needed to decide whether the to_iso_date /
@@ -7,7 +7,7 @@ preprocessing/longitudinal.py) actually mattered in practice. Writes nothing;
 run this before deciding whether any date-parsing fix is worth carrying further.
 
 Usage:
-  python tasks/longitudinal_NEPC/diagnose_dates.py --output-dir /path/to/output
+  python tasks/longitudinal_subtype/diagnose_dates.py --output-dir /path/to/output
 """
 
 import argparse

@@ -1,6 +1,6 @@
 import pytest
 
-from tasks.longitudinal_NEPC.mcrpc_gate import (
+from tasks.longitudinal_subtype.mcrpc_gate import (
     CASTRATION_RESISTANT,
     METASTATIC,
     STATE_SCREENS,

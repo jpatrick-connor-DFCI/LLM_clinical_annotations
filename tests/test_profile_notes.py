@@ -192,7 +192,7 @@ def test_pan_cancer_stage_candidates_include_numeric_substage_and_tnm(tmp_path):
     assert _normalize_stage_group("pT3N1M0") is None
 
 
-def test_longitudinal_nepc_candidates_include_composite_atomic_facts():
+def test_longitudinal_subtype_candidates_include_composite_atomic_facts():
     assert find_trigger_matches("Gleason 4+4=8", NEPC_TRIGGER_REGEX)
     assert find_trigger_matches(
         "There is no evidence of osseous metastatic disease.",

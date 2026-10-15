@@ -6,7 +6,6 @@ import polars as pl
 import pytest
 
 from preprocessing.cli.collect_gleason_notes import run as collect_gleason
-from preprocessing.cli.collect_met_dx_notes import run as collect_met_dx
 from preprocessing.cli.collect_nepc_notes import run as collect_nepc
 from preprocessing.cli.compile_patient_snippets import run as compile_snippets
 from preprocessing.bundles.snippet_bundle import (
@@ -17,13 +16,13 @@ from preprocessing.bundles.snippet_bundle import (
 from preprocessing.notes import load_notes
 from preprocessing.parquet_io import write_metadata
 from preprocessing.triggers import TRIGGER_REGEX, find_trigger_matches
-from tasks.binary_NEPC.run_NEPC_classifier import (
+from tasks.binary_subtype.run_NEPC_classifier import (
     _normalize_model_result,
     classify_patient,
     make_row,
     validate_result,
 )
-from tasks.binary_NEPC.prompts import CLASSIFY_SYSTEM_PROMPT
+from tasks.binary_subtype.prompts import CLASSIFY_SYSTEM_PROMPT
 from tasks.cancer_stage.run_stage_extraction import validate_stage_finding
 from tasks.gleason_score.build_gleason_timeline import (
     RAW_COLUMNS,
@@ -33,7 +32,7 @@ from tasks.gleason_score.build_gleason_timeline import (
     build_timeline,
     validate_gleason_finding,
 )
-from tasks.longitudinal_NEPC.prompts import CANONICAL_CRITERIA
+from tasks.longitudinal_subtype.prompts import CANONICAL_CRITERIA
 
 
 def test_prompt_required_nepc_and_molecular_avpc_terms_are_triggered():
@@ -84,7 +83,7 @@ def test_binary_avpc_prompt_requires_castration_resistant_metastatic_disease():
         assert f'"{field}": true | false' in CLASSIFY_SYSTEM_PROMPT
 
 
-@pytest.mark.parametrize("collector", ["binary", "gleason", "nepc", "met_dx"])
+@pytest.mark.parametrize("collector", ["binary", "gleason", "nepc"])
 def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collector):
     common = {
         "output_dir": tmp_path,
@@ -111,7 +110,7 @@ def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collec
             scan_workers=1,
         )
         target = collect_gleason
-    elif collector == "nepc":
+    else:
         args = SimpleNamespace(
             **common,
             note_types=None,
@@ -120,15 +119,6 @@ def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collec
             scan_workers=1,
         )
         target = collect_nepc
-    else:
-        args = SimpleNamespace(
-            **common,
-            note_types=None,
-            context_chars=1500,
-            payload_max_chars=60_000,
-            scan_workers=1,
-        )
-        target = collect_met_dx
 
     with pytest.raises(ValueError, match="prostate-specific"):
         target(args)

@@ -16,7 +16,7 @@ from preprocessing.parquet_io import write_parquet_atomic
 from preprocessing.triggers import TRIGGER_REGEX, build_snippet, find_trigger_matches
 from preprocessing.utils import clean_note
 
-_BINARY_NEPC_PROFILE = SNIPPET_PROFILES["binary_nepc"]
+_BINARY_SUBTYPE_PROFILE = SNIPPET_PROFILES["binary_subtype"]
 
 
 def _scan_note_row(row, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX):
@@ -76,8 +76,8 @@ def _chunked(seq, size):
 def scan_note_candidates(
     notes_df,
     *,
-    context_chars=_BINARY_NEPC_PROFILE.context_chars,
-    snippet_max_chars=_BINARY_NEPC_PROFILE.max_chars,
+    context_chars=_BINARY_SUBTYPE_PROFILE.context_chars,
+    snippet_max_chars=_BINARY_SUBTYPE_PROFILE.max_chars,
     max_workers=None,
     trigger_regex=TRIGGER_REGEX,
     progress_desc="Scanning notes",
@@ -169,7 +169,7 @@ def rank_patient_candidates(
     for mrn in tqdm(
         mrns,
         total=len(mrns),
-        desc="Compiling binary NEPC patients",
+        desc="Compiling binary subtype patients",
         unit="patient",
         dynamic_ncols=True,
     ):
@@ -234,9 +234,9 @@ def build_patient_snippets(
     *,
     all_mrns=None,
     max_notes_per_patient=75,
-    context_chars=_BINARY_NEPC_PROFILE.context_chars,
-    snippet_max_chars=_BINARY_NEPC_PROFILE.max_chars,
-    payload_max_chars=_BINARY_NEPC_PROFILE.payload_max_chars,
+    context_chars=_BINARY_SUBTYPE_PROFILE.context_chars,
+    snippet_max_chars=_BINARY_SUBTYPE_PROFILE.max_chars,
+    payload_max_chars=_BINARY_SUBTYPE_PROFILE.payload_max_chars,
     max_workers=None,
     cache_dir=None,
 ):
@@ -247,7 +247,7 @@ def build_patient_snippets(
     patient and capped by `max_notes_per_patient` / `payload_max_chars`. Pass
     `all_mrns` to report patient-level progress over the complete cohort.
 
-    Sizing defaults match `SNIPPET_PROFILES["binary_nepc"]`; callers for other
+    Sizing defaults match `SNIPPET_PROFILES["binary_subtype"]`; callers for other
     tasks should pass values from their own `SnippetProfile` explicitly.
 
     If `cache_dir` is given, the ranked result is cached under a content+params
@@ -257,7 +257,7 @@ def build_patient_snippets(
         if all_mrns is not None:
             for _ in tqdm(
                 sorted({int(mrn) for mrn in all_mrns}),
-                desc="Compiling binary NEPC patients",
+                desc="Compiling binary subtype patients",
                 unit="patient",
                 dynamic_ncols=True,
             ):

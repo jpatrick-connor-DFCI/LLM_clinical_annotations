@@ -4,6 +4,7 @@ import polars as pl
 
 from preprocessing.bundles.snippet_bundle import load_snippet_bundle
 from preprocessing.cli.compile_patient_snippets import run as compile_snippets
+from tasks.binary_NEPC import run_NEPC_classifier
 from tasks.binary_NEPC.run_NEPC_classifier import (
     _run_fingerprint,
     conventional_row,
@@ -61,3 +62,14 @@ def test_binary_run_fingerprint_changes_with_bundle_content(tmp_path):
     second = _run_fingerprint(bundle, "vertex_ai", "model")
 
     assert first != second
+
+
+def test_binary_run_fingerprint_changes_with_the_mcrpc_gate(tmp_path, monkeypatch):
+    """The gate decides has_avpc, so a gate change must force --overwrite."""
+    bundle = tmp_path / "bundle.parquet"
+    pl.DataFrame({"value": ["first"]}).write_parquet(bundle)
+    baseline = _run_fingerprint(bundle, "vertex_ai", "model")
+    for name in ("GATE_VERSION", "MET_VETO_VERSION"):
+        with monkeypatch.context() as patch:
+            patch.setattr(run_NEPC_classifier, name, "changed")
+            assert _run_fingerprint(bundle, "vertex_ai", "model") != baseline

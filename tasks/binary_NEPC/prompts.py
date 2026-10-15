@@ -22,8 +22,17 @@ Each snippet was selected because it contains language relevant to one of:
           INSM1) on a prostate-derived specimen
       Any documented neuroendocrine feature is sufficient for `nepc` — do NOT downgrade
       to `avpc` because the wording is hedged.
-   b. avpc — chart documents aggressive-variant or anaplastic prostate cancer language, OR
-      satisfies one or more Aparicio aggressive-variant criteria:
+   b. avpc — Aparicio et al. 2013 (Table 1): castration-resistant, metastatic prostate
+      carcinoma with AT LEAST ONE of the criteria C1–C7 below. Aggressive-variant or
+      anaplastic wording alone is NOT sufficient. `has_avpc` is true exactly when:
+        - `avpc_criteria` lists at least one criterion, AND
+        - metastatic disease is documented: `has_metastatic_disease` (item 4), or C2,
+          C3, or C5, which describe metastases, AND
+        - castration resistance is documented: `has_castration_resistance` (item 4), or
+          C7. C1 small-cell histology does not require castration resistance, but it
+          still requires metastatic disease.
+      List every criterion the chart documents in `avpc_criteria`, even when the
+      definition is not met. The criteria:
         C1 small-cell histology
         C2 predominantly lytic bone metastases, rather than blastic. Concurrent
            visceral, nodal, or other metastases are allowed. Blastic- or
@@ -58,7 +67,7 @@ Each snippet was selected because it contains language relevant to one of:
    d. conventional — none of the above.
 
    PRECEDENCE IS STRICT: if NEPC criteria are met, the primary bucket is `nepc` even when
-   AVPC criteria (C1–C7) are ALSO met. `avpc` is only chosen when NEPC criteria are absent.
+   the AVPC definition is ALSO met. `avpc` is only chosen when NEPC criteria are absent.
 
 2. SEPARATELY, flag whether the chart documents a NON-PROSTATE PRIMARY cancer
    (synchronous or metachronous, e.g., NSCLC/SCLC, colorectal, urothelial/bladder,
@@ -77,6 +86,25 @@ Each snippet was selected because it contains language relevant to one of:
    in `biomarker_genes` when documented, regardless of whether `has_molecular_avpc`
    is set.
 
+4. SEPARATELY, report the two disease states the AVPC definition presupposes, whatever
+   the primary bucket:
+   - `has_metastatic_disease`: distant (M1) metastatic prostate cancer documented as
+     present: bone, visceral, or distant nodal metastases, or an explicit "metastatic",
+     mCRPC, mHSPC, or M1 statement. Regional pelvic lymph nodes alone (N1) do not qualify.
+   - `has_castration_resistance`: castration-resistant disease documented as present: an
+     explicit CRPC, castration-resistant, hormone-refractory, or androgen-independent
+     statement, or PSA or radiographic progression stated to occur on ADT or another
+     castrating therapy.
+   Treatment alone never establishes a state: docetaxel, abiraterone, enzalutamide, or
+   lutetium without a stated progression or metastatic site does not count. When a state
+   is true, set its quote to one short verbatim sentence or clause that plainly affirms it
+   (for example "metastatic castration-resistant prostate cancer" in an assessment) and
+   its quote date to that note's note_date; when false, set both to null. A state quote
+   that negates, hedges, or anticipates the state ("no evidence of metastatic disease",
+   "progression to mCRPC", "risk of castration resistance"), clinical-trial eligibility
+   text, or a regional nodal finding is rejected by a deterministic check, and the state
+   then counts as not documented.
+
 ## RULES
 - Use only the snippets provided. Do not infer beyond documented evidence.
 - Suspicion, screening, planned testing, pending stains, and clinical-trial eligibility
@@ -89,8 +117,8 @@ Each snippet was selected because it contains language relevant to one of:
 - If a pathology report documents NE features, set `has_nepc = true` and
   `primary_label = "nepc"` even if clinician notes still describe the disease as AVPC
   or adenocarcinoma.
-- Quotes must be verbatim. Prefer substantive quotes that preserve surrounding clinical
-  context (roughly 40–120 words each). Include the sentence(s) on either side of the
+- Quotes must be verbatim. In `supporting_quotes`, prefer substantive quotes that preserve
+  surrounding clinical context (roughly 40–120 words each). Include the sentence(s) on either side of the
   key finding when they clarify specimen source, timing, or diagnostic certainty.
 - Output length is constrained: return AT MOST 8 supporting quotes total, choosing the
   most decisive/earliest evidence for each distinct finding (primary bucket, each AVPC
@@ -120,6 +148,12 @@ Return ONLY valid JSON.
   "biomarker_genes": ["BRCA2"],
   "avpc_criteria": ["C1", "C2"],
   "visceral_met_pattern": "visceral_only | none",
+  "has_metastatic_disease": true | false,
+  "metastatic_quote": "<verbatim quote> | null",
+  "metastatic_quote_date": "YYYY-MM-DD | null",
+  "has_castration_resistance": true | false,
+  "castration_resistance_quote": "<verbatim quote> | null",
+  "castration_resistance_quote_date": "YYYY-MM-DD | null",
   "has_non_prostate_primary": true | false,
   "non_prostate_primary_types": ["NSCLC", "colorectal"],
   "supporting_quotes": ["<verbatim quote>"],

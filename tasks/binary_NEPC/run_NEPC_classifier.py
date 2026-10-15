@@ -29,6 +29,16 @@ from preprocessing.parquet_io import (  # noqa: E402
 from providers import get_provider  # noqa: E402
 from providers.response import parse_json_response  # noqa: E402
 from tasks.binary_NEPC.prompts import CLASSIFY_SYSTEM_PROMPT  # noqa: E402
+from tasks.longitudinal_NEPC.mcrpc_gate import (  # noqa: E402
+    CASTRATION_EXEMPT_CRITERIA,
+    CASTRATION_RESISTANT,
+    CASTRATION_RESISTANT_CRITERIA,
+    GATE_VERSION,
+    MET_VETO_VERSION,
+    METASTATIC,
+    METASTATIC_CRITERIA,
+    STATE_SCREENS,
+)
 
 
 OUTPUT_COLUMNS = [
@@ -49,13 +59,33 @@ OUTPUT_COLUMNS = [
     "confidence",
     "rationale",
     "num_snippets",
+    "has_metastatic_disease",
+    "metastatic_quote",
+    "metastatic_quote_date",
+    "has_castration_resistance",
+    "castration_resistance_quote",
+    "castration_resistance_quote_date",
+    "avpc_gate_reasons",
 ]
 FAILURE_COLUMNS = ["DFCI_MRN", "error", "num_snippets"]
 _PRIMARY_LABELS = {"nepc", "avpc", "biomarker", "conventional"}
 _CONFIDENCE_LEVELS = {"high", "medium", "low"}
 _AVPC_CRITERIA = {f"C{index}" for index in range(1, 8)}
+# (flag, quote, quote date) output fields for each AVPC disease state.
+_STATE_FIELDS = {
+    METASTATIC: (
+        "has_metastatic_disease",
+        "metastatic_quote",
+        "metastatic_quote_date",
+    ),
+    CASTRATION_RESISTANT: (
+        "has_castration_resistance",
+        "castration_resistance_quote",
+        "castration_resistance_quote_date",
+    ),
+}
 _DEFAULT_OUTPUT_CORRECTION_RETRIES = 2
-BINARY_EXTRACTION_SCHEMA_VERSION = "binary-nepc-grounded-parquet-v4"
+BINARY_EXTRACTION_SCHEMA_VERSION = "binary-nepc-grounded-parquet-v5"
 
 
 def parse_args():
@@ -160,12 +190,36 @@ def _list_or_original(value):
     return value
 
 
+def _missing_avpc_states(criteria, has_metastatic, has_resistance):
+    """Return the disease states the AVPC definition still lacks.
+
+    Aparicio et al. 2013, Table 1: castration-resistant, metastatic prostate
+    carcinoma with at least one of C1-C7. C2, C3, and C5 describe metastases
+    and C7 is castration resistance; small-cell histology (C1) is exempt from
+    castration resistance. A non-empty `criteria` with nothing missing meets
+    the definition.
+    """
+    # Malformed (non-string) entries are left for validation to reject.
+    criteria = {value for value in criteria if isinstance(value, str)}
+    missing = []
+    if not (has_metastatic or criteria & METASTATIC_CRITERIA):
+        missing.append(METASTATIC)
+    if not (
+        has_resistance
+        or criteria & (CASTRATION_RESISTANT_CRITERIA | CASTRATION_EXEMPT_CRITERIA)
+    ):
+        missing.append(CASTRATION_RESISTANT)
+    return missing
+
+
 def _normalize_model_result(result, snippets):
     """Apply only deterministic schema repairs before strict validation.
 
     Clinical assertions are not invented here. Derived fields are recomputed from
     their detailed fields, and quote dates are repaired only when the exact quote
-    can be grounded in a supplied snippet.
+    can be grounded in a supplied snippet. A disease state whose grounded quote
+    fails the mCRPC gate is withdrawn, and `has_avpc` is derived from the
+    criteria and the surviving states.
     """
     normalized = dict(result)
     for field in (
@@ -192,6 +246,52 @@ def _normalize_model_result(result, snippets):
     non_prostate_types = normalized.get("non_prostate_primary_types")
     if isinstance(non_prostate_types, list):
         normalized["has_non_prostate_primary"] = bool(non_prostate_types)
+
+    gate_reasons = []
+    for state, (flag, quote_field, date_field) in _STATE_FIELDS.items():
+        if normalized.get(flag) is False:
+            normalized[quote_field] = None
+            normalized[date_field] = None
+            continue
+        quote = normalized.get(quote_field)
+        # A non-boolean flag or a missing/ungrounded quote is left for
+        # validation to report, so the model gets a correction retry.
+        if normalized.get(flag) is not True or not isinstance(quote, str):
+            continue
+        support = find_quote_support(
+            quote, snippets, claimed_date=normalized.get(date_field)
+        )
+        if support is None:
+            support = find_quote_support(quote, snippets)
+        if support is None:
+            continue
+        normalized[date_field] = support.get("note_date")
+        ok, reason = STATE_SCREENS[state](quote)
+        if not ok:
+            # The gate is the precision rule the model cannot override. It
+            # withdraws the state rather than failing the patient, since a
+            # correction retry would re-send the whole patient payload.
+            gate_reasons.append(f"state_quote_rejected:{state}:{reason}")
+            normalized[flag] = False
+            normalized[quote_field] = None
+            normalized[date_field] = None
+
+    criteria = normalized.get("avpc_criteria")
+    has_metastatic = normalized.get("has_metastatic_disease")
+    has_resistance = normalized.get("has_castration_resistance")
+    if (
+        isinstance(criteria, list)
+        and isinstance(has_metastatic, bool)
+        and isinstance(has_resistance, bool)
+    ):
+        missing = (
+            _missing_avpc_states(criteria, has_metastatic, has_resistance)
+            if criteria
+            else []
+        )
+        gate_reasons.extend(f"missing_state:{state}" for state in missing)
+        normalized["has_avpc"] = bool(criteria) and not missing
+    normalized["avpc_gate_reasons"] = gate_reasons
 
     if all(
         isinstance(normalized.get(field), bool)
@@ -262,6 +362,12 @@ Re-read the original patient payload and return one corrected JSON object only.
 - Derive primary_label strictly from has_nepc, then has_avpc, then has_biomarker.
 - has_biomarker must equal whether biomarker_genes contains BRCA1 or BRCA2.
 - has_molecular_avpc must equal whether biomarker_genes contains at least two of PTEN, TP53, RB1.
+- has_avpc must be true exactly when avpc_criteria is non-empty, metastatic disease is
+  documented (has_metastatic_disease, or C2, C3, or C5), and castration resistance is
+  documented (has_castration_resistance, or C7; C1 is exempt).
+- has_metastatic_disease and has_castration_resistance must be booleans. When one is true,
+  its quote must be an exact substring of one note_text and its quote date that note's
+  note_date; when it is false, set both to null.
 - supporting_quotes and supporting_quote_dates must be parallel arrays of equal length.
 - Every quote must be a short, exact, contiguous substring copied from one supplied note_text,
   and its date must exactly equal that note's note_date. Never paraphrase or splice passages.
@@ -341,6 +447,9 @@ def validate_result(result, snippets):
     for field in boolean_fields:
         if not isinstance(result.get(field), bool):
             return None, f"invalid_boolean:{field}"
+    for flag, _, _ in _STATE_FIELDS.values():
+        if not isinstance(result.get(flag), bool):
+            return None, f"invalid_boolean:{flag}"
 
     primary_label = result.get("primary_label")
     if primary_label not in _PRIMARY_LABELS:
@@ -369,10 +478,18 @@ def validate_result(result, snippets):
             return None, f"invalid_list:{field}"
 
     criteria = result["avpc_criteria"]
-    if any(value not in _AVPC_CRITERIA for value in criteria):
+    if any(
+        not isinstance(value, str) or value not in _AVPC_CRITERIA
+        for value in criteria
+    ):
         return None, "invalid_avpc_criterion"
-    if criteria and not result["has_avpc"]:
-        return None, "avpc_criteria_without_has_avpc"
+    expected_avpc = bool(criteria) and not _missing_avpc_states(
+        criteria,
+        result["has_metastatic_disease"],
+        result["has_castration_resistance"],
+    )
+    if result["has_avpc"] != expected_avpc:
+        return None, "inconsistent_has_avpc"
     visceral_pattern = result.get("visceral_met_pattern")
     if visceral_pattern not in {"visceral_only", "none"}:
         return None, f"invalid_visceral_met_pattern:{visceral_pattern}"
@@ -407,6 +524,22 @@ def validate_result(result, snippets):
         support = find_quote_support(quote, snippets, claimed_date=quote_date)
         if support is None or support.get("note_date") != quote_date:
             return None, "supporting_quote_or_date_not_in_evidence"
+
+    for state, (flag, quote_field, date_field) in _STATE_FIELDS.items():
+        quote = result.get(quote_field)
+        quote_date = result.get(date_field)
+        if not result[flag]:
+            if quote is not None or quote_date is not None:
+                return None, f"state_quote_without_state:{flag}"
+            continue
+        if not isinstance(quote, str) or not quote.strip():
+            return None, f"missing_state_quote:{flag}"
+        support = find_quote_support(quote, snippets, claimed_date=quote_date)
+        if support is None or support.get("note_date") != quote_date:
+            return None, f"state_quote_or_date_not_in_evidence:{flag}"
+        ok, reason = STATE_SCREENS[state](quote)
+        if not ok:
+            return None, f"state_quote_fails_gate:{flag}:{reason}"
 
     return result, None
 
@@ -459,6 +592,17 @@ def make_row(mrn, num_snippets, result):
         "confidence": result.get("confidence"),
         "rationale": result.get("rationale"),
         "num_snippets": int(num_snippets),
+        "has_metastatic_disease": result.get("has_metastatic_disease"),
+        "metastatic_quote": result.get("metastatic_quote"),
+        "metastatic_quote_date": result.get("metastatic_quote_date"),
+        "has_castration_resistance": result.get("has_castration_resistance"),
+        "castration_resistance_quote": result.get("castration_resistance_quote"),
+        "castration_resistance_quote_date": result.get(
+            "castration_resistance_quote_date"
+        ),
+        "avpc_gate_reasons": [
+            str(reason) for reason in _as_list(result.get("avpc_gate_reasons"))
+        ],
     }
 
 
@@ -481,6 +625,13 @@ def conventional_row(mrn):
         "confidence": "high",
         "rationale": "No NEPC / AVPC / biomarker / non-prostate-primary triggers found in any reviewed note.",
         "num_snippets": 0,
+        "has_metastatic_disease": False,
+        "metastatic_quote": None,
+        "metastatic_quote_date": None,
+        "has_castration_resistance": False,
+        "castration_resistance_quote": None,
+        "castration_resistance_quote_date": None,
+        "avpc_gate_reasons": [],
     }
 
 
@@ -504,6 +655,10 @@ def _run_fingerprint(snippets_path, provider_name, model):
         CLASSIFY_SYSTEM_PROMPT,
         CLINICAL_SAFETY_CONTEXT,
         BINARY_EXTRACTION_SCHEMA_VERSION,
+        # The disease-state gate decides has_avpc, and its metastatic screen
+        # reuses the met_diagnosis veto.
+        GATE_VERSION,
+        MET_VETO_VERSION,
         json.dumps(OUTPUT_COLUMNS),
     ):
         hasher.update(value.encode("utf-8"))

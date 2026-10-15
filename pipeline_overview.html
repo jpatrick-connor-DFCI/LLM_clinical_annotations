@@ -790,7 +790,7 @@
           <div class="field"><code>review_status</code><p><code>llm_classified</code>, <code>no_trigger</code>, or <code>no_notes</code>.</p></div>
           <div class="field"><code>primary_label</code><p><code>nepc</code>, <code>avpc</code>, <code>biomarker</code>, or <code>conventional</code>.</p></div>
           <div class="field"><code>has_nepc</code><p>Boolean NEPC evidence flag.</p></div>
-          <div class="field"><code>has_avpc</code><p>Boolean canonical clinical AVPC flag.</p></div>
+          <div class="field"><code>has_avpc</code><p>Aparicio Table 1 AVPC: castration-resistant, metastatic disease with at least one of C1–C7 (C1 is exempt from castration resistance). Derived from the criteria and the two gated disease states.</p></div>
           <div class="field"><code>has_biomarker</code><p>Boolean qualifying somatic BRCA1/BRCA2 flag.</p></div>
           <div class="field"><code>has_molecular_avpc</code><p>At least two altered genes among PTEN/TP53/RB1.</p></div>
           <div class="field"><code>has_non_prostate_primary</code><p>Independent second-primary cancer flag.</p></div>
@@ -803,6 +803,13 @@
           <div class="field"><code>confidence</code><p>High, medium, or low.</p></div>
           <div class="field"><code>rationale</code><p>Required classification explanation.</p></div>
           <div class="field"><code>num_snippets</code><p>Evidence snippets presented to the model.</p></div>
+          <div class="field"><code>has_metastatic_disease</code><p>Distant (M1) metastatic disease documented; regional pelvic nodes alone do not qualify.</p></div>
+          <div class="field"><code>metastatic_quote</code><p>Grounded verbatim quote affirming metastatic disease, or null.</p></div>
+          <div class="field"><code>metastatic_quote_date</code><p>Source date of that quote.</p></div>
+          <div class="field"><code>has_castration_resistance</code><p>Castration resistance documented, explicitly or as progression on castrating therapy.</p></div>
+          <div class="field"><code>castration_resistance_quote</code><p>Grounded verbatim quote affirming castration resistance, or null.</p></div>
+          <div class="field"><code>castration_resistance_quote_date</code><p>Source date of that quote.</p></div>
+          <div class="field"><code>avpc_gate_reasons</code><p>Native Parquet list of why the AVPC definition was not met: a state quote withdrawn by the deterministic gate, or a missing state.</p></div>
         </div>
       </div>
     </article>
@@ -878,6 +885,8 @@
               <tr><td>C5</td><td>PSA ≤10 ng/mL in a qualifying disease context plus at least 20 bone metastases.</td></tr>
               <tr><td>C6</td><td>Qualifying neuroendocrine marker plus LDH/CEA ≥2× ULN or malignant hypercalcemia, without another cause.</td></tr>
               <tr><td>C7</td><td>CRPC/androgen-independent progression within six months of hormonal-therapy initiation.</td></tr>
+              <tr><td>STATE:metastatic</td><td>AVPC disease state: distant (M1) metastatic disease documented as present. C2, C3, and C5 also establish it; regional pelvic nodes alone (N1) do not.</td></tr>
+              <tr><td>STATE:castration_resistant</td><td>AVPC disease state: castration resistance documented as present, explicitly or as progression on castrating therapy. C7 also establishes it. State quotes must pass the deterministic gate in <code>mcrpc_gate.py</code>; a patient with only disease states stays conventional.</td></tr>
               <tr><td>NEPC sub-features</td><td>Small-cell diagnosis, histologic transformation, neuroendocrine features/differentiation, and positive neuroendocrine IHC are tracked independently.</td></tr>
             </tbody>
           </table>
@@ -900,7 +909,8 @@
         </div>
         <p style="margin-top:0.8rem;color:var(--muted);font-size:0.86rem">
           The extraction fingerprint binds the evidence scan hash, provider, model, both full
-          prompts, and prompt schema version <code>longitudinal-nepc-v7</code>.
+          prompts, prompt schema version <code>longitudinal-nepc-v8</code>, and the
+          disease-state gate and metastatic veto versions.
         </p>
       </div>
 
@@ -929,11 +939,11 @@
           <div class="field"><code>event_date</code><p>Resolved criterion onset date.</p></div>
           <div class="field"><code>date_source</code><p><code>stated</code>, <code>note_date</code>, or <code>unknown</code>.</p></div>
           <div class="field"><code>date_precision</code><p>Day, month, year, or unknown.</p></div>
-          <div class="field"><code>criterion_added</code><p>C1–C7 or an NEPC sub-feature code.</p></div>
+          <div class="field"><code>criterion_added</code><p>C1–C7, an NEPC sub-feature code, or a <code>STATE:*</code> disease state.</p></div>
           <div class="field"><code>criterion_label</code><p>Human-readable canonical definition.</p></div>
           <div class="field"><code>modality</code><p>Pathology, imaging, clinical, or labs.</p></div>
           <div class="field"><code>visceral_met_pattern</code><p><code>visceral_only</code> for valid C3.</p></div>
-          <div class="field"><code>cumulative_criteria</code><p>Native Parquet list of criteria established by that date.</p></div>
+          <div class="field"><code>cumulative_criteria</code><p>Native Parquet list of criteria established by that date; disease states are not counted.</p></div>
           <div class="field"><code>num_criteria_to_date</code><p>Cumulative criterion count.</p></div>
           <div class="field"><code>supporting_quote</code><p>Grounded verbatim onset evidence.</p></div>
           <div class="field"><code>confidence</code><p>High, medium, or low.</p></div>

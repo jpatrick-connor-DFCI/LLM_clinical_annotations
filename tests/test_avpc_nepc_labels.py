@@ -1,7 +1,11 @@
 import polars as pl
+import pytest
 
 from tasks.longitudinal_NEPC.build_nepc_timeline import TIMELINE_COLUMNS
 from tasks.longitudinal_NEPC import build_avpc_nepc_labels as labels
+
+MET = "STATE:metastatic"
+CR = "STATE:castration_resistant"
 
 
 def _row(
@@ -60,110 +64,161 @@ def _labels_by_mrn(path):
     return {row["DFCI_MRN"]: row for row in pl.read_parquet(path).to_dicts()}
 
 
-def test_fourth_criterion_sets_avpc_date(tmp_path):
+def _label(tmp_path, rows):
     timeline = tmp_path / "timeline.parquet"
     labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-02-01"),
-        _row(1, "C3", "2020-03-01"),
-        _row(1, "C4", "2020-04-01"),
-    ]
     _write_timeline(timeline, rows)
-
-    assert labels.build_labels(timeline, labels_path) == 1
-    row = _labels_by_mrn(labels_path)[1]
-    assert row["has_avpc"] == 1
-    # Dated at the 4th criterion, not the 3rd: AVPC_THRESHOLD == 4.
-    assert row["avpc_date"] == "2020-04-01"
-    assert row["n_avpc_criteria"] == 4
-    assert row["has_avpc_nepc"] == 1
-    assert row["avpc_nepc_date"] == "2020-04-01"
-    assert row["label_source"] == "timeline_positive"
-    assert row["avpc_criteria"] == ["C1", "C2", "C3", "C4"]
-
-
-def test_three_criteria_stays_negative(tmp_path):
-    """Boundary guard for AVPC_THRESHOLD == 4: three criteria is not enough."""
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-02-01"),
-        _row(1, "C3", "2020-03-01"),
-    ]
-    _write_timeline(timeline, rows)
-
     labels.build_labels(timeline, labels_path)
-    row = _labels_by_mrn(labels_path)[1]
-    assert row["has_avpc"] == 0
-    assert row["avpc_date"] is None
-    assert row["n_avpc_criteria"] == 3
-    assert row["has_avpc_nepc"] == 0
-    assert row["label_source"] == "timeline_negative"
+    return _labels_by_mrn(labels_path)
 
 
-def test_same_date_block_jumps_from_two_to_four(tmp_path):
-    """A same-date block pushing the count 2 -> 4 dates the event at that block."""
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-01-01"),
-        _row(1, "C3", "2020-06-01"),
-        _row(1, "C4", "2020-06-01"),
-    ]
-    _write_timeline(timeline, rows)
-
-    labels.build_labels(timeline, labels_path)
-    row = _labels_by_mrn(labels_path)[1]
+def test_one_criterion_in_castration_resistant_metastatic_disease_is_avpc(tmp_path):
+    """Aparicio Table 1: one criterion suffices, but only in mCRPC. AVPC begins
+    once the criterion and both disease states are all documented."""
+    row = _label(
+        tmp_path,
+        [
+            _row(1, MET, "2020-01-01", quote="Bone metastases."),
+            _row(1, "C4", "2020-04-01", quote="Bulky nodes."),
+            _row(1, CR, "2020-06-01", quote="mCRPC on enzalutamide."),
+        ],
+    )[1]
     assert row["has_avpc"] == 1
     assert row["avpc_date"] == "2020-06-01"
-    assert row["n_avpc_criteria"] == 4
+    assert row["n_avpc_criteria"] == 1
+    assert row["avpc_criteria"] == ["C4"]
+    assert row["has_avpc_nepc"] == 1
+    assert row["avpc_nepc_date"] == "2020-06-01"
+    assert row["label_source"] == "timeline_positive"
+    # The row that completed the definition supplies the evidence.
+    assert row["supporting_quote"] == "mCRPC on enzalutamide."
+    assert row["metastatic_date"] == "2020-01-01"
+    assert row["castration_resistant_date"] == "2020-06-01"
+    assert row["avpc_gate_missing"] == []
+
+
+def test_criteria_without_the_disease_states_are_not_avpc(tmp_path):
+    """Bulky nodes and an NE marker with high LDH occur outside mCRPC too."""
+    row = _label(
+        tmp_path,
+        [_row(1, "C4", "2020-01-01"), _row(1, "C6", "2020-02-01")],
+    )[1]
+    assert row["has_avpc"] == 0
+    assert row["avpc_date"] is None
+    assert row["n_avpc_criteria"] == 2
+    assert row["has_avpc_nepc"] == 0
+    assert row["label_source"] == "timeline_negative"
+    assert row["metastatic_date"] is None
+    assert row["castration_resistant_date"] is None
+    assert row["avpc_gate_missing"] == ["metastatic", "castration_resistant"]
+
+
+def test_small_cell_is_exempt_from_castration_resistance_but_not_metastasis(tmp_path):
+    by_mrn = _label(
+        tmp_path,
+        [
+            _row(1, "C1", "2020-01-01"),
+            _row(1, MET, "2020-03-01"),
+            _row(2, "C1", "2020-01-01"),
+        ],
+    )
+    exempt = by_mrn[1]
+    assert exempt["has_avpc"] == 1
+    assert exempt["avpc_date"] == "2020-03-01"
+    # C1 satisfies the castration condition without being resistance.
+    assert exempt["castration_resistant_date"] is None
+    assert exempt["avpc_gate_missing"] == []
+
+    localized = by_mrn[2]
+    assert localized["has_avpc"] == 0
+    assert localized["avpc_gate_missing"] == ["metastatic"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "avpc_date", "metastatic_date", "resistant_date"),
+    [
+        # C2, C3, and C5 describe metastases.
+        ([_row(1, "C2", "2020-02-01"), _row(1, CR, "2020-05-01")],
+         "2020-05-01", "2020-02-01", "2020-05-01"),
+        # C7 is progression to castration resistance.
+        ([_row(1, MET, "2020-01-01"), _row(1, "C7", "2020-03-01")],
+         "2020-03-01", "2020-01-01", "2020-03-01"),
+        ([_row(1, "C3", "2020-06-01"), _row(1, "C7", "2020-02-01")],
+         "2020-06-01", "2020-06-01", "2020-02-01"),
+        ([_row(1, "C5", "2020-02-01"), _row(1, "C7", "2020-02-01")],
+         "2020-02-01", "2020-02-01", "2020-02-01"),
+    ],
+)
+def test_criteria_that_presuppose_a_state_supply_it(
+    tmp_path, rows, avpc_date, metastatic_date, resistant_date
+):
+    row = _label(tmp_path, rows)[1]
+    assert row["has_avpc"] == 1
+    assert row["avpc_date"] == avpc_date
+    assert row["metastatic_date"] == metastatic_date
+    assert row["castration_resistant_date"] == resistant_date
+
+
+@pytest.mark.parametrize(
+    ("criterion", "missing"),
+    [("C2", ["castration_resistant"]), ("C7", ["metastatic"])],
+)
+def test_an_implied_state_does_not_supply_the_other(tmp_path, criterion, missing):
+    row = _label(tmp_path, [_row(1, criterion, "2020-01-01")])[1]
+    assert row["has_avpc"] == 0
+    assert row["avpc_gate_missing"] == missing
+
+
+def test_same_date_tie_is_defined_by_the_first_criterion_row(tmp_path):
+    row = _label(
+        tmp_path,
+        [
+            _row(1, "C4", "2020-01-01", quote="Bulky nodes."),
+            _row(1, "C2", "2020-01-01", quote="Lytic bone metastases."),
+            _row(1, CR, "2020-01-01", quote="mCRPC."),
+        ],
+    )[1]
+    assert row["has_avpc"] == 1
+    assert row["avpc_date"] == "2020-01-01"
+    assert row["n_avpc_criteria"] == 2
+    # C2 sorts before C4, and a criterion row beats a tied disease-state row.
+    assert row["supporting_quote"] == "Lytic bone metastases."
 
 
 def test_nepc_precedence_overrides_timing(tmp_path):
-    """Three C criteria (below AVPC_THRESHOLD) + a NEPC feature at 2020-10-27
-    -> has_avpc==0, has_nepc_timeline==1, avpc_nepc_date == the NEPC date.
-
-    The union fires on the NEPC arm alone, and NEPC precedence times it.
-    """
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-02-01"),
-        _row(1, "C3", "2020-04-10"),
-        _row(1, "NEPC:ne_features", "2020-10-27"),
-    ]
-    _write_timeline(timeline, rows)
-
-    labels.build_labels(timeline, labels_path)
-    row = _labels_by_mrn(labels_path)[1]
+    """AVPC met at 2020-04-10 + a NEPC feature at 2020-10-27: the union is
+    timed by NEPC precedence, not by the earlier AVPC date."""
+    row = _label(
+        tmp_path,
+        [
+            _row(1, "C2", "2020-02-01"),
+            _row(1, CR, "2020-04-10"),
+            _row(1, "NEPC:ne_features", "2020-10-27", quote="NE features."),
+        ],
+    )[1]
+    assert row["has_avpc"] == 1
+    assert row["avpc_date"] == "2020-04-10"
     assert row["has_nepc_timeline"] == 1
     assert row["nepc_timeline_date"] == "2020-10-27"
     assert row["has_avpc_nepc"] == 1
     assert row["avpc_nepc_date"] == "2020-10-27"
-    # n_avpc_criteria still reflects the C-only count reached along the way.
-    assert row["n_avpc_criteria"] == 3
+    assert row["supporting_quote"] == "NE features."
 
 
-def test_nepc_keys_never_contribute_to_c_count(tmp_path):
+def test_nepc_keys_never_contribute_to_c_count_or_disease_states(tmp_path):
     """2 C + 2 NEPC -> NEPC-positive by the NEPC rule, n_avpc_criteria == 2."""
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-02-01"),
-        _row(1, "NEPC:small_cell_dx", "2020-03-01"),
-        _row(1, "NEPC:ne_features", "2020-04-01"),
-    ]
-    _write_timeline(timeline, rows)
-
-    labels.build_labels(timeline, labels_path)
-    row = _labels_by_mrn(labels_path)[1]
+    row = _label(
+        tmp_path,
+        [
+            _row(1, "C4", "2020-01-01"),
+            _row(1, "C6", "2020-02-01"),
+            _row(1, "NEPC:small_cell_dx", "2020-03-01"),
+            _row(1, "NEPC:ne_features", "2020-04-01"),
+        ],
+    )[1]
     assert row["has_avpc"] == 0
     assert row["n_avpc_criteria"] == 2
+    assert row["avpc_gate_missing"] == ["metastatic", "castration_resistant"]
     assert row["has_nepc_timeline"] == 1
     assert row["nepc_timeline_date"] == "2020-03-01"
     assert row["has_avpc_nepc"] == 1
@@ -171,48 +226,89 @@ def test_nepc_keys_never_contribute_to_c_count(tmp_path):
     assert row["nepc_criteria"] == ["NEPC:ne_features", "NEPC:small_cell_dx"]
 
 
-def test_undated_only_positive_is_demoted(tmp_path):
-    """A patient who would cross AVPC_THRESHOLD only via undated evidence is
-    demoted to has_avpc_nepc = 0.
+def test_definition_completed_only_by_undated_evidence_is_demoted(tmp_path, capsys):
+    """Undated evidence can complete the definition but cannot time it, so the
+    patient is demoted rather than counted as an untimed positive."""
+    undated = {"date_source": None, "date_precision": "unknown"}
+    by_mrn = _label(
+        tmp_path,
+        [
+            # Undated disease state.
+            _row(1, "C4", "2020-01-01"),
+            _row(1, MET, "2020-02-01"),
+            _row(1, CR, None, **undated),
+            # Undated criterion.
+            _row(2, MET, "2020-01-01"),
+            _row(2, CR, "2020-02-01"),
+            _row(2, "C4", None, **undated),
+        ],
+    )
+    for mrn, missing, n_criteria in ((1, ["castration_resistant"], 1), (2, [], 0)):
+        row = by_mrn[mrn]
+        assert row["has_avpc"] == 0
+        assert row["avpc_date"] is None
+        assert row["has_avpc_nepc"] == 0
+        assert row["label_source"] == "timeline_negative"
+        # Only dated criteria count toward n_avpc_criteria.
+        assert row["n_avpc_criteria"] == n_criteria
+        assert row["avpc_gate_missing"] == missing
+    assert "definition only met via undated evidence): 2" in capsys.readouterr().out
 
-    Dated criteria reach 3 (one short of the threshold); the undated 4th would
-    tip it over but cannot time the event, so the patient is demoted rather
-    than counted as an untimed positive.
-    """
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [
-        _row(1, "C1", "2020-01-01"),
-        _row(1, "C2", "2020-02-01"),
-        _row(1, "C3", "2020-03-01"),
-        # Undated: event_date is None.
-        _row(1, "C4", None, date_source=None, date_precision="unknown"),
-    ]
-    _write_timeline(timeline, rows)
 
-    labels.build_labels(timeline, labels_path)
-    row = _labels_by_mrn(labels_path)[1]
+def test_disease_states_alone_stay_conventional(tmp_path):
+    """Most mCRPC is conventional: the states are not AVPC/NEPC criteria."""
+    row = _label(
+        tmp_path,
+        [
+            _row(1, MET, "2020-01-01"),
+            _row(1, CR, "2020-02-01"),
+            _conventional_row(1),
+        ],
+    )[1]
     assert row["has_avpc"] == 0
-    assert row["avpc_date"] is None
     assert row["has_avpc_nepc"] == 0
-    # Only dated criteria count toward n_avpc_criteria.
-    assert row["n_avpc_criteria"] == 3
-    assert row["label_source"] == "timeline_negative"
+    assert row["n_avpc_criteria"] == 0
+    assert row["label_source"] == "conventional"
+    assert row["metastatic_date"] == "2020-01-01"
+    assert row["castration_resistant_date"] == "2020-02-01"
+    assert row["avpc_gate_missing"] == []
 
 
 def test_conventional_row_stays_negative(tmp_path):
-    timeline = tmp_path / "timeline.parquet"
-    labels_path = tmp_path / "labels.parquet"
-    rows = [_conventional_row(1)]
-    _write_timeline(timeline, rows)
-
-    labels.build_labels(timeline, labels_path)
-    row = _labels_by_mrn(labels_path)[1]
+    row = _label(tmp_path, [_conventional_row(1)])[1]
     assert row["has_avpc"] == 0
     assert row["has_nepc_timeline"] == 0
     assert row["has_avpc_nepc"] == 0
     assert row["label_source"] == "conventional"
     assert row["n_avpc_criteria"] == 0
+    assert row["metastatic_date"] is None
+    assert row["castration_resistant_date"] is None
+    assert row["avpc_gate_missing"] == []
+
+
+def test_label_columns_only_append_gate_fields():
+    """COMPASS reads these labels by column name; the gate fields go last."""
+    assert labels.LABEL_COLUMNS == [
+        "DFCI_MRN",
+        "has_avpc",
+        "avpc_date",
+        "has_nepc_timeline",
+        "nepc_timeline_date",
+        "has_avpc_nepc",
+        "avpc_nepc_date",
+        "date_source",
+        "date_precision",
+        "n_avpc_criteria",
+        "avpc_criteria",
+        "nepc_criteria",
+        "supporting_quote",
+        "confidence",
+        "source_note_date",
+        "label_source",
+        "metastatic_date",
+        "castration_resistant_date",
+        "avpc_gate_missing",
+    ]
 
 
 def test_missing_timeline_file_is_non_fatal(tmp_path):

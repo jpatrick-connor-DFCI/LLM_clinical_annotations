@@ -7,6 +7,7 @@ import pytest
 from preprocessing.config import LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION
 from preprocessing.longitudinal import file_sha256, group_patient_snippets, write_scan_config_meta
 from preprocessing.triggers import TRIGGER_REGEX, find_trigger_matches
+from tasks.longitudinal_NEPC import build_avpc_nepc_labels as labels
 from tasks.longitudinal_NEPC import build_nepc_timeline as nepc
 from tasks.longitudinal_NEPC.history import (
     build_history_context,
@@ -85,10 +86,32 @@ def test_avpc_retrieval_covers_canonical_atomic_evidence(text):
     assert find_trigger_matches(text, {"avpc": TRIGGER_REGEX["avpc"]})
 
 
+def test_prompts_report_the_avpc_disease_states():
+    assert "AVPC is castration-resistant, metastatic prostate carcinoma" in (
+        NEPC_SYSTEM_PROMPT
+    )
+    assert "Report `STATE:metastatic` and `STATE:castration_resistant` in" in (
+        NEPC_SYSTEM_PROMPT
+    )
+    assert "Report a `STATE:*` disease state only from a chunk's" in (
+        NEPC_SYNTHESIS_PROMPT
+    )
+
+
 def test_extraction_fingerprint_changes_with_model():
     first = nepc.extraction_run_config("scan", "vertex_ai", "model-a")
     second = nepc.extraction_run_config("scan", "vertex_ai", "model-b")
     assert first != second
+
+
+def test_extraction_fingerprint_changes_with_the_mcrpc_gate(monkeypatch):
+    """The gate decides which disease states survive, so a gate change must
+    force --overwrite."""
+    baseline = nepc.extraction_run_config("scan", "vertex_ai", "model")
+    for name in ("GATE_VERSION", "MET_VETO_VERSION"):
+        with monkeypatch.context() as patch:
+            patch.setattr(nepc, name, "changed")
+            assert nepc.extraction_run_config("scan", "vertex_ai", "model") != baseline
 
 
 def test_custom_evidence_uses_adjacent_metadata(tmp_path):
@@ -227,6 +250,59 @@ def test_raw_rows_mark_only_c3_as_visceral_only():
     assert {row["criterion"]: row["visceral_met_pattern"] for row in rows} == {
         "C2": None,
         "C3": "visceral_only",
+    }
+
+
+def test_map_validation_gates_disease_state_quotes():
+    result = {
+        "criteria_found": [
+            _finding(
+                "STATE:metastatic",
+                "Bone scan demonstrates at least 24 osseous metastases.",
+                "2021-06-05",
+                None,
+            ),
+            # A PSA value at progression does not say it progressed on ADT.
+            _finding(
+                "STATE:castration_resistant",
+                "At progression PSA was 7.2 ng/mL.",
+                "2021-06-03",
+                None,
+            ),
+        ],
+        "evidence_items": [],
+    }
+    normalized, error = nepc.validate_map_result(result, _chunks())
+    assert error is None
+    assert [f["criterion"] for f in normalized["criteria_found"]] == [
+        "STATE:metastatic"
+    ]
+    assert normalized["criteria_found"][0]["visceral_met_pattern"] == "none"
+    assert normalized["rejected"] == {
+        "state_gate:castration_resistant:no_castration_resistance_term": 1
+    }
+
+
+def test_synthesis_validation_gates_disease_state_quotes():
+    on_castration = "PSA progression on leuprolide."
+    anticipated = "Risk of developing castration resistance discussed."
+    chunks = {
+        0: [
+            {"note_date": "2021-01-04", "note_type": "Clinician", "snippet": on_castration},
+            {"note_date": "2021-02-01", "note_type": "Clinician", "snippet": anticipated},
+        ]
+    }
+    result = {
+        "criteria_found": [
+            _finding("STATE:castration_resistant", anticipated, "2021-02-01", None),
+            _finding("STATE:castration_resistant", on_castration, "2021-01-04", None),
+        ]
+    }
+    normalized, error = nepc.validate_synthesis_result(result, chunks)
+    assert error is None
+    assert [f["quote"] for f in normalized["criteria_found"]] == [on_castration]
+    assert normalized["rejected"] == {
+        "state_gate:castration_resistant:negated_or_hedged:risk of": 1
     }
 
 
@@ -584,6 +660,46 @@ def test_timeline_adds_undated_auto_conventional_cohort_rows(tmp_path):
     assert row["modality"] == "automatic"
 
 
+def test_disease_states_are_timeline_rows_but_not_criteria(tmp_path):
+    raw = tmp_path / "raw.parquet"
+    timeline = tmp_path / "timeline.parquet"
+    rows = [
+        {
+            "DFCI_MRN": mrn,
+            "chunk_index": 0,
+            "source_note_date": event_date,
+            "criterion": criterion,
+            "diagnosis_date": event_date,
+            "modality": "clinical",
+            "visceral_met_pattern": None,
+            "quote": "support",
+            "confidence": "high",
+        }
+        for mrn, criterion, event_date in (
+            (123, "STATE:metastatic", "2021-01-01"),
+            (123, "C4", "2021-02-01"),
+            (123, "STATE:castration_resistant", "2021-03-01"),
+            (456, "STATE:metastatic", "2021-01-01"),
+        )
+    ]
+    nepc._write_rows_atomic(raw, rows, nepc.RAW_COLUMNS)
+
+    assert nepc.build_timeline(raw, timeline, conventional_mrns={123, 456}) == 5
+
+    output = pl.read_parquet(timeline)
+    assert output.select("DFCI_MRN", "criterion_added").rows() == [
+        (123, "STATE:metastatic"),
+        (123, "C4"),
+        (123, "STATE:castration_resistant"),
+        (456, "STATE:metastatic"),
+        # A disease state alone leaves the patient conventional.
+        (456, "conventional"),
+    ]
+    assert output["cumulative_criteria"].to_list() == [[], ["C4"], ["C4"], [], []]
+    assert output["num_criteria_to_date"].to_list() == [0, 1, 1, 0, 0]
+    assert output["criterion_label"][0] == nepc.CRITERION_LABELS["STATE:metastatic"]
+
+
 def test_payload_budget_smaller_than_snippet_cap_is_rejected():
     notes = pl.DataFrame(
         {
@@ -807,6 +923,87 @@ def test_dropped_findings_are_counted_in_the_processed_log(tmp_path, monkeypatch
     assert rejected.height == 1
     assert rejected["stage"].to_list() == ["synthesis"]
     assert rejected["reason"].to_list() == ["quote_or_source_not_in_evidence"]
+
+
+def test_disease_states_alone_keep_the_patient_conventional(tmp_path, monkeypatch):
+    """Most mCRPC is conventional: the states survive to date the label, but
+    without an AVPC/NEPC criterion the patient keeps the conventional row."""
+    quote = "Assessment: mCRPC, on enzalutamide."
+    evidence = tmp_path / "avpc_nepc_evidence.parquet"
+    meta = tmp_path / "avpc_nepc_evidence.meta.parquet"
+    pl.DataFrame(
+        {
+            "DFCI_MRN": [123],
+            "chunk_index": [0],
+            "note_date": ["2021-06-03"],
+            "note_type": ["Clinician"],
+            "snippet": [quote],
+        }
+    ).write_parquet(evidence)
+    write_scan_config_meta(
+        meta,
+        "scan-1",
+        evidence_sha256=file_sha256(evidence),
+        evidence_schema_version=LONGITUDINAL_NEPC_EVIDENCE_SCHEMA_VERSION,
+    )
+    states = [
+        _finding(state, quote, "2021-06-03", None)
+        for state in ("STATE:metastatic", "STATE:castration_resistant")
+    ]
+
+    class Provider:
+        default_model = "model-a"
+
+        def build_client(self):
+            return object()
+
+        def call_with_retry(self, client, model, messages, max_retries):
+            payload = json.loads(messages[1]["content"])
+            if "chunk_maps" in payload:
+                return json.dumps({"criteria_found": states}), None
+            return json.dumps({"criteria_found": states, "evidence_items": []}), None
+
+    monkeypatch.setattr(nepc, "get_provider", lambda name: Provider())
+    nepc.run(
+        Namespace(
+            output_dir=tmp_path,
+            evidence_path=evidence,
+            evidence_meta_path=None,
+            mrn_file=None,
+            mrns=None,
+            provider="vertex_ai",
+            model=None,
+            max_workers=1,
+            max_retries=1,
+            limit_patients=None,
+            overwrite=False,
+        )
+    )
+
+    raw = pl.read_parquet(tmp_path / "avpc_nepc_extractions_raw.parquet")
+    assert sorted(raw["criterion"].to_list()) == [
+        "STATE:castration_resistant",
+        "STATE:metastatic",
+    ]
+    processed = pl.read_parquet(tmp_path / "avpc_nepc_processed_patients.parquet")
+    assert processed["num_criteria"].to_list() == [2]
+    timeline_path = tmp_path / "avpc_nepc_timeline.parquet"
+    timeline = pl.read_parquet(timeline_path)
+    assert timeline["criterion_added"].to_list() == [
+        "STATE:castration_resistant",
+        "STATE:metastatic",
+        "conventional",
+    ]
+    assert timeline["num_criteria_to_date"].to_list() == [0, 0, 0]
+
+    labels_path = tmp_path / "avpc_nepc_labels.parquet"
+    labels.build_labels(timeline_path, labels_path)
+    label = pl.read_parquet(labels_path).row(0, named=True)
+    assert label["has_avpc"] == 0
+    assert label["has_avpc_nepc"] == 0
+    assert label["label_source"] == "conventional"
+    assert label["metastatic_date"] == "2021-06-03"
+    assert label["castration_resistant_date"] == "2021-06-03"
 
 
 def test_history_digest_is_deterministic_and_capped():

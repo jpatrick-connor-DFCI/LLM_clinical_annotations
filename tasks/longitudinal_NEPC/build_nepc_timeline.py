@@ -5,9 +5,15 @@ evidence chunks. This stage maps every chunk into compact structured evidence,
 then reduces all successful chunk maps for a patient into one patient-level
 criterion result. Chunk maps and patient reductions are durable resume state.
 
+Alongside C1-C7 and the NEPC sub-features, both stages report the two disease
+states Aparicio's AVPC definition presupposes (`STATE:metastatic`,
+`STATE:castration_resistant`). A state quote must pass the deterministic gate
+in `mcrpc_gate.py`; `build_avpc_nepc_labels.py` applies the definition.
+
 The resume fingerprint includes the evidence scan, provider, model, prompt
-texts, and prompt schema version. Changing any of them requires `--overwrite`;
-this prevents mixed-model or mixed-prompt research outputs.
+texts, prompt schema version, and the state-gate versions. Changing any of them
+requires `--overwrite`; this prevents mixed-model or mixed-prompt research
+outputs.
 """
 
 import argparse
@@ -54,6 +60,11 @@ from tasks.longitudinal_NEPC.history import (  # noqa: E402
     build_history_context,
     normalize_history_summary,
 )
+from tasks.longitudinal_NEPC.mcrpc_gate import (  # noqa: E402
+    GATE_VERSION,
+    MET_VETO_VERSION,
+    STATE_SCREENS,
+)
 from tasks.longitudinal_NEPC.prompts import (  # noqa: E402
     NEPC_SYNTHESIS_PROMPT,
     NEPC_SYSTEM_PROMPT,
@@ -74,8 +85,14 @@ CRITERION_LABELS = {
     "NEPC:histologic_transformation": "NEPC: histologic transformation from adenocarcinoma",
     "NEPC:ne_features": "NEPC: neuroendocrine features / differentiation",
     "NEPC:positive_ne_ihc": "NEPC: positive neuroendocrine IHC on prostate-derived specimen",
+    "STATE:metastatic": "AVPC disease state: metastatic prostate cancer",
+    "STATE:castration_resistant": "AVPC disease state: castration-resistant prostate cancer",
 }
 VALID_CRITERIA = set(CRITERION_LABELS)
+# Disease states are eligibility conditions for AVPC, not AVPC/NEPC criteria:
+# they never count toward a patient's criteria and never make a patient
+# AVPC/NEPC-positive on their own.
+STATE_KEYS = {key for key in CRITERION_LABELS if key.startswith("STATE:")}
 VALID_MODALITIES = {"pathology", "imaging", "clinical", "labs"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 SUCCESS_STATUSES = {"ok", "ok_with_rejections"}
@@ -376,7 +393,9 @@ def extraction_run_config(scan_config, provider_name, model):
     HISTORY_VERSION is included deliberately: changing how carried patient
     history is built or presented changes what a chunk can see, so it must
     force --overwrite rather than mixing chunks produced under two different
-    history contracts.
+    history contracts. GATE_VERSION and MET_VETO_VERSION are included for the
+    same reason: they decide which disease-state findings survive validation,
+    and the metastatic screen reuses the met_diagnosis veto.
     """
     payload = {
         "schema": PROMPT_SCHEMA_VERSION,
@@ -387,6 +406,8 @@ def extraction_run_config(scan_config, provider_name, model):
         "synthesis_prompt": NEPC_SYNTHESIS_PROMPT,
         "safety_context": CLINICAL_SAFETY_CONTEXT,
         "history": HISTORY_VERSION,
+        "gate": GATE_VERSION,
+        "met_veto": MET_VETO_VERSION,
         "columns": [
             RAW_COLUMNS,
             CHUNK_COLUMNS,
@@ -617,6 +638,23 @@ def _quote_supports_criterion(criterion, quote):
     return bool(pattern and re.search(pattern, quote, flags=re.IGNORECASE))
 
 
+def _quote_rejection(normalized):
+    """Return why a grounded finding's quote fails its criterion, else None.
+
+    A disease state is screened by the deterministic mCRPC gate, which also
+    rejects negated, hedged, anticipatory, and trial-eligibility quotes; a
+    criterion only needs its keyword pattern.
+    """
+    criterion = normalized["criterion"]
+    if criterion in STATE_KEYS:
+        state = criterion.partition(":")[2]
+        ok, reason = STATE_SCREENS[state](normalized["quote"])
+        return None if ok else f"state_gate:{state}:{reason}"
+    if not _quote_supports_criterion(criterion, normalized["quote"]):
+        return f"quote_does_not_support_criterion:{criterion}"
+    return None
+
+
 def _quote_supports_fact_type(fact_type, quote):
     pattern = FACT_TYPE_QUOTE_PATTERNS.get(fact_type)
     return bool(pattern and re.search(pattern, quote, flags=re.IGNORECASE))
@@ -721,13 +759,9 @@ def validate_map_result(result, chunks):
         if error:
             record_rejection(error, item)
             continue
-        if not _quote_supports_criterion(
-            normalized["criterion"], normalized["quote"]
-        ):
-            record_rejection(
-                f"quote_does_not_support_criterion:{normalized['criterion']}",
-                item,
-            )
+        rejection = _quote_rejection(normalized)
+        if rejection:
+            record_rejection(rejection, item)
             continue
         vmp, c3_reject = _resolve_c3_pattern(normalized)
         if c3_reject:
@@ -846,13 +880,9 @@ def validate_synthesis_result(result, chunks):
         if error:
             record_rejection(error, item)
             continue
-        if not _quote_supports_criterion(
-            normalized["criterion"], normalized["quote"]
-        ):
-            record_rejection(
-                f"quote_does_not_support_criterion:{normalized['criterion']}",
-                item,
-            )
+        rejection = _quote_rejection(normalized)
+        if rejection:
+            record_rejection(rejection, item)
             continue
         criterion = normalized["criterion"]
         vmp, c3_reject = _resolve_c3_pattern(normalized)
@@ -1311,7 +1341,11 @@ def build_timeline(raw_path, timeline_path, conventional_mrns=None):
             while position < len(events) and events[position]["event_date"] == event_date:
                 same_date.append(events[position])
                 position += 1
-            cumulative.update(item["criterion_added"] for item in same_date)
+            cumulative.update(
+                item["criterion_added"]
+                for item in same_date
+                if item["criterion_added"] not in STATE_KEYS
+            )
             for item in same_date:
                 row = dict(item)
                 row["cumulative_criteria"] = sorted(cumulative)
@@ -1321,7 +1355,12 @@ def build_timeline(raw_path, timeline_path, conventional_mrns=None):
     # A conventional designation is a cohort-level absence-of-evidence label,
     # not a dated criterion. Keep its temporal fields empty and its cumulative
     # criterion count at zero so it cannot be mistaken for an AVPC/NEPC event.
-    positive_mrns = set(by_patient)
+    # Disease-state rows alone leave a patient conventional: most mCRPC is.
+    positive_mrns = {
+        mrn
+        for mrn, records in by_patient.items()
+        if any(record["criterion_added"] not in STATE_KEYS for record in records)
+    }
     for mrn in sorted(conventional_mrns - positive_mrns):
         output.append(
             {
@@ -1371,11 +1410,16 @@ def rebuild_final_artifacts(
     positive_mrns = set()
     if raw_path.exists() and raw_path.stat().st_size > 0:
         raw_frame = pl.read_parquet(raw_path)
-        if "DFCI_MRN" in raw_frame.columns:
+        if {"DFCI_MRN", "criterion"}.issubset(raw_frame.columns):
+            # A patient with only disease-state findings has no AVPC/NEPC
+            # criterion, so stays conventional (see build_timeline).
             positive_mrns = {
                 mrn
-                for value in raw_frame["DFCI_MRN"].drop_nulls().to_list()
-                if (mrn := _to_exact_int(value)) is not None
+                for value, criterion in raw_frame.select(
+                    "DFCI_MRN", "criterion"
+                ).iter_rows()
+                if criterion not in STATE_KEYS
+                and (mrn := _to_exact_int(value)) is not None
             }
 
     recorded_cohort = {

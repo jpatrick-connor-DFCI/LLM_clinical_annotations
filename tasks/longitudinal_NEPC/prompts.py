@@ -3,7 +3,7 @@
 
 # Bump this whenever either prompt's semantics or output contract changes. The
 # stage-2 run fingerprint includes both this value and the complete prompt text.
-PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v7"
+PROMPT_SCHEMA_VERSION = "longitudinal-nepc-v8"
 
 # Longest quote the map stage is asked to return. Quotes are most of a map
 # reply, so the cap keeps replies inside the output token limit; the runner
@@ -38,6 +38,28 @@ requirements, the lytic-predominance requirement, or the exclusivity
 requirement. C2 requires bone metastases and C3 excludes them, so a single
 disease state can never support both.
 
+### AVPC disease states (Aparicio Table 1)
+AVPC is castration-resistant, metastatic prostate carcinoma with at least one
+of C1-C7. Report the two disease states as findings of their own so the
+definition can be applied:
+STATE:metastatic            Distant (M1) metastatic prostate cancer documented
+                            as present: bone, visceral, or distant nodal
+                            metastases, or an explicit "metastatic", mCRPC,
+                            mHSPC, or M1 statement. Regional pelvic lymph nodes
+                            alone (N1) do not qualify.
+STATE:castration_resistant  Castration-resistant disease documented as present:
+                            an explicit CRPC, castration-resistant,
+                            hormone-refractory, or androgen-independent
+                            statement, or PSA or radiographic progression
+                            stated to occur on ADT or another castrating
+                            therapy.
+C2, C3, and C5 already establish metastatic disease, and C7 already
+establishes castration resistance. Small-cell histology (C1) does not require
+castration resistance but still requires metastatic disease. Treatment alone
+never establishes a state: docetaxel, abiraterone, enzalutamide, or lutetium
+without a stated progression or metastatic site does not count. Keep reporting
+every C1-C7 criterion whether or not the states are documented.
+
 ### NEPC sub-features (track independently from AVPC criteria)
 NEPC:small_cell_dx              Neuroendocrine or small-cell prostate carcinoma diagnosis.
 NEPC:histologic_transformation Histologic transformation from prostate adenocarcinoma
@@ -59,8 +81,9 @@ single patient's de-identified note snippets.
 ## INPUT
 The payload may include an optional `prior_history` object summarizing
 *earlier chunks for this same patient*:
-- `criteria_established`: canonical criteria already confirmed by earlier
-  chunks, with their earliest known diagnosis date.
+- `criteria_established`: canonical criteria and `STATE:*` disease states
+  already confirmed by earlier chunks, with their earliest known diagnosis
+  date.
 - `established_facts`: atomic facts (candidate_criterion, fact_type,
   fact_value, fact_date, source_note_date) already documented by earlier
   chunks.
@@ -95,6 +118,15 @@ bone disease in `prior_history` never establishes exclusivity.
    with `prior_history` under the enabling rule above. The fact that completes
    the criterion must come from this chunk, and `quote` / `source_note_date`
    must identify that completing fact.
+   Report `STATE:metastatic` and `STATE:castration_resistant` in
+   `criteria_found` whenever this chunk documents them, even if
+   `prior_history` already established them, so the earliest documentation
+   survives. Quote the plainest affirmative statement of the state, such as
+   "metastatic castration-resistant prostate cancer" in an assessment. A state
+   quote that negates, hedges, or anticipates the state ("no evidence of
+   metastatic disease", "progression to mCRPC", "risk of castration
+   resistance"), clinical-trial eligibility text, or a regional nodal finding
+   is rejected by a deterministic check.
 2. Report only criterion-determining atomic facts in `evidence_items`, even when
    the chunk does not contain enough information to establish the full criterion.
    These compact items will be combined with other chunks in a patient-level
@@ -125,6 +157,8 @@ bone disease in `prior_history` never establishes exclusivity.
    `candidate_criterion` and `fact_type` must be one exact pair from that list.
    Never put a criterion prefix in `fact_type` (use `bone_metastasis_status`,
    not `C3:bone_metastasis_status`) and never invent a synonym or new fact type.
+   `STATE:*` findings have no fact types: report them only in
+   `criteria_found`.
 
 ## RULES
 - Use only the snippets. Findings must be documented as present, not suspected,
@@ -205,9 +239,11 @@ for one prostate-cancer patient.
 {CANONICAL_CRITERIA}
 
 ## TASK
-Combine facts across chunks and return every canonical AVPC criterion and NEPC
-sub-feature documented as present. Report each criterion once, using its
-earliest supportable occurrence.
+Combine facts across chunks and return every canonical AVPC criterion, AVPC
+disease state (`STATE:metastatic`, `STATE:castration_resistant`), and NEPC
+sub-feature documented as present. Report each one once, using its earliest
+supportable occurrence. Report the criteria whether or not the disease states
+are documented; the AVPC definition is applied downstream.
 
 The payload may include an optional `patient_history` string: the final
 carried narrative written across the patient's chunks, offered as advisory
@@ -233,9 +269,18 @@ under the same rules as always.
   Report C3 only when the combined evidence establishes exclusivity, with
   `visceral_met_pattern` set to "visceral_only"; omit C3 otherwise. Use "none"
   for every non-C3 criterion.
+- Report a `STATE:*` disease state only from a chunk's `criteria_found` entry
+  for that state, or from an evidence item that itself states it (for example
+  a `bone_metastasis_count` fact for `STATE:metastatic` or a
+  `crpc_progression` fact for `STATE:castration_resistant`). The quote must
+  affirm the state; negated, hedged, anticipatory, trial-eligibility, and
+  regional nodal quotes are rejected by a deterministic check. Treatment alone
+  never establishes a state.
 - Findings must concern prostate cancer and be documented as present.
-- `source_note_date` must be copied exactly from an evidence item.
-- quote must be copied verbatim from an evidence item.
+- `source_note_date` must be copied exactly from an evidence item or a chunk's
+  `criteria_found` entry.
+- quote must be copied verbatim from an evidence item or a chunk's
+  `criteria_found` entry.
 - modality: "pathology" | "imaging" | "clinical" | "labs".
 - confidence: "high" | "medium" | "low".
 

@@ -5,12 +5,21 @@ calls, no resume fingerprint, no chunk log. It reads
 `avpc_nepc_timeline.parquet` (built by `build_nepc_timeline.py`) and derives,
 per patient:
 
-- `AVPC`: >=4 distinct Aparicio `C1`-`C7` criteria, timed at the earliest
-  `event_date` the count first reaches 4.
+- `AVPC`: Aparicio et al. 2013, Table 1 -- castration-resistant, metastatic
+  prostate carcinoma with at least one of the `C1`-`C7` criteria. Metastatic
+  disease is a `STATE:metastatic` row or C2/C3/C5, which presuppose it;
+  castration resistance is a `STATE:castration_resistant` row or C7. Small-cell
+  histology (C1) is exempt from castration resistance (Table 1, footnote a)
+  but must still be metastatic. Timed at the earliest `event_date` by which a
+  criterion and both disease states are all documented.
 - `NEPC_TIMELINE`: any `NEPC:*` criterion, timed at the earliest such
   `event_date`.
 - `AVPC_NEPC` (modeled): the union of the two, with NEPC-precedence timing --
   `nepc_timeline_date` if any NEPC criterion is present, else `avpc_date`.
+
+`metastatic_date` / `castration_resistant_date` are each disease state's
+earliest dated documentation, and `avpc_gate_missing` lists the states a
+patient with a dated criterion lacks.
 
 The timeline is already deduped to earliest onset per (patient, criterion) by
 `build_timeline`'s `_prefer_onset`, so no re-deduplication happens here.
@@ -30,13 +39,29 @@ if str(REPO_ROOT) not in sys.path:
 from preprocessing.parquet_io import write_rows_atomic  # noqa: E402
 from tasks.longitudinal_NEPC.build_nepc_timeline import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
+    STATE_KEYS,
     TIMELINE_COLUMNS,
     VALID_CRITERIA,
+)
+from tasks.longitudinal_NEPC.mcrpc_gate import (  # noqa: E402
+    CASTRATION_EXEMPT_CRITERIA,
+    CASTRATION_RESISTANT,
+    CASTRATION_RESISTANT_CRITERIA,
+    METASTATIC,
+    METASTATIC_CRITERIA,
 )
 
 AVPC_KEYS = {f"C{i}" for i in range(1, 8)}
 NEPC_KEYS = {key for key in VALID_CRITERIA if key.startswith("NEPC:")}
-AVPC_THRESHOLD = 4
+# Table 1: "castrate-resistant prostate carcinoma with at least 1 of" C1-C7.
+AVPC_MIN_CRITERIA = 1
+METASTATIC_KEYS = {f"STATE:{METASTATIC}"} | METASTATIC_CRITERIA
+CASTRATION_RESISTANT_KEYS = (
+    {f"STATE:{CASTRATION_RESISTANT}"} | CASTRATION_RESISTANT_CRITERIA
+)
+# Rows that satisfy the castration-resistance condition: resistance itself, or
+# small-cell histology, which the definition exempts from it.
+CASTRATION_GATE_KEYS = CASTRATION_RESISTANT_KEYS | CASTRATION_EXEMPT_CRITERIA
 
 LABEL_COLUMNS = [
     "DFCI_MRN",
@@ -55,6 +80,9 @@ LABEL_COLUMNS = [
     "confidence",
     "source_note_date",
     "label_source",
+    "metastatic_date",
+    "castration_resistant_date",
+    "avpc_gate_missing",
 ]
 
 
@@ -62,8 +90,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Reduce the AVPC/NEPC criteria timeline into one patient-level "
-            "label row (>=4 Aparicio criteria and/or any NEPC feature, with "
-            "NEPC-precedence timing)."
+            "label row (castration-resistant metastatic disease with >=1 "
+            "Aparicio criterion and/or any NEPC feature, with NEPC-precedence "
+            "timing)."
         )
     )
     parser.add_argument(
@@ -87,35 +116,60 @@ def _read_timeline(timeline_path):
     return pl.read_parquet(timeline_path)
 
 
+def _earliest(rows, keys):
+    """Return the earliest dated row whose criterion is in `keys`, else None."""
+    return min(
+        (row for row in rows if row["criterion_added"] in keys),
+        key=lambda row: (row["event_date"], row["criterion_added"]),
+        default=None,
+    )
+
+
+def _avpc_definition_met(criteria):
+    """Whether a set of timeline criterion keys meets the AVPC definition."""
+    return (
+        len(criteria & AVPC_KEYS) >= AVPC_MIN_CRITERIA
+        and bool(criteria & METASTATIC_KEYS)
+        and bool(criteria & CASTRATION_GATE_KEYS)
+    )
+
+
 def _build_patient_label(mrn, rows):
     """Reduce one patient's timeline rows into a label dict.
 
-    `rows` is every timeline row for this patient (dated criteria, undated
-    criteria, and/or the synthetic `conventional` row). Returns a dict shaped
-    like `LABEL_COLUMNS`, or `None` if the patient has no rows at all (should
-    not happen given how callers group, but keeps this function total).
+    `rows` is every timeline row for this patient (dated criteria and disease
+    states, undated ones, and/or the synthetic `conventional` row). Returns a
+    dict shaped like `LABEL_COLUMNS`, or `None` if the patient has no rows at
+    all (should not happen given how callers group, but keeps this function
+    total).
     """
     if not rows:
         return None
 
     dated = [row for row in rows if row.get("event_date")]
     undated = [row for row in rows if not row.get("event_date")]
-    is_conventional_only = len(rows) == 1 and rows[0].get("criterion_added") == "conventional"
+    # Disease-state rows sit alongside the conventional row of a patient with
+    # no criteria (most mCRPC is conventional), so they don't count here.
+    criterion_rows = [
+        row for row in rows if row.get("criterion_added") not in STATE_KEYS
+    ]
+    is_conventional_only = (
+        len(criterion_rows) == 1
+        and criterion_rows[0].get("criterion_added") == "conventional"
+    )
 
     dated_sorted = sorted(
         dated, key=lambda row: (row["event_date"], row["criterion_added"])
     )
 
     # Walk dated rows in (event_date, criterion_added) order, accumulating
-    # distinct C1-C7 criteria. avpc_date is the event_date of the row at
-    # which the cumulative C-only count first reaches AVPC_THRESHOLD.
-    # Same-date blocks are applied together (matching build_timeline's own
-    # same-date cumulative-count semantics) so a block that pushes the count
-    # from below AVPC_THRESHOLD to at or above it in one date is dated at that
-    # date.
+    # distinct C1-C7 criteria. criteria_row is the row at which the cumulative
+    # C-only count first reaches AVPC_MIN_CRITERIA. Same-date blocks are
+    # applied together (matching build_timeline's own same-date
+    # cumulative-count semantics) so a block that pushes the count from below
+    # AVPC_MIN_CRITERIA to at or above it in one date is dated at that date.
     c_seen = set()
-    avpc_date = None
-    avpc_row = None
+    criteria_row = None
     position = 0
     while position < len(dated_sorted):
         event_date = dated_sorted[position]["event_date"]
@@ -130,27 +184,43 @@ def _build_patient_label(mrn, rows):
         for row in same_date:
             if row["criterion_added"] in AVPC_KEYS:
                 c_seen.add(row["criterion_added"])
-        if avpc_date is None and before < AVPC_THRESHOLD <= len(c_seen):
-            avpc_date = event_date
-            # The row that "defined" this block: earliest-sorted C-key row in
-            # the block that is itself an AVPC criterion (falls back to the
-            # first row in the block if none, which cannot happen since the
-            # count only grows via AVPC_KEYS rows).
-            avpc_candidates = [r for r in same_date if r["criterion_added"] in AVPC_KEYS]
-            avpc_row = avpc_candidates[0] if avpc_candidates else same_date[0]
+        if criteria_row is None and before < AVPC_MIN_CRITERIA <= len(c_seen):
+            # The earliest-sorted C-key row in the block; one exists because the
+            # count only grows via AVPC_KEYS rows.
+            criteria_row = next(
+                r for r in same_date if r["criterion_added"] in AVPC_KEYS
+            )
     n_avpc_criteria = len(c_seen)
 
-    # Undated evidence can never time or count toward the threshold, but it
-    # can still push the *set* of distinct criteria the patient has ever
-    # shown -- used only to detect the undated-only-positive demotion case
+    # The definition presupposes castration-resistant metastatic disease, so a
+    # criterion alone is not AVPC. Each disease state is timed at its earliest
+    # dated documentation, whether a STATE:* row or a criterion implying it.
+    metastatic_row = _earliest(dated, METASTATIC_KEYS)
+    resistant_row = _earliest(dated, CASTRATION_RESISTANT_KEYS)
+    castration_gate_row = _earliest(dated, CASTRATION_GATE_KEYS)
+    avpc_gate_missing = []
+    if criteria_row is not None:
+        if metastatic_row is None:
+            avpc_gate_missing.append(METASTATIC)
+        if castration_gate_row is None:
+            avpc_gate_missing.append(CASTRATION_RESISTANT)
+    avpc_row = None
+    if criteria_row is not None and not avpc_gate_missing:
+        # AVPC begins once all three hold. max() keeps the first of tied rows,
+        # so on a tie the criterion row, not a disease-state row, is the
+        # defining row and supplies the quote.
+        avpc_row = max(
+            (criteria_row, metastatic_row, castration_gate_row),
+            key=lambda row: row["event_date"],
+        )
+    avpc_date = avpc_row["event_date"] if avpc_row is not None else None
+
+    # Undated evidence can never time AVPC, but it can complete the
+    # definition -- used only to detect the undated-only-positive demotion case
     # below, not for n_avpc_criteria (spec: "max C-only cumulative count
     # reached ... over dated rows only").
-    c_seen_including_undated = set(c_seen)
-    for row in undated:
-        if row["criterion_added"] in AVPC_KEYS:
-            c_seen_including_undated.add(row["criterion_added"])
-    undated_only_avpc_positive = (
-        avpc_date is None and len(c_seen_including_undated) >= AVPC_THRESHOLD
+    undated_only_avpc_positive = avpc_date is None and _avpc_definition_met(
+        {row.get("criterion_added") for row in rows}
     )
 
     # NEPC: earliest event_date among dated NEPC:* rows. NEPC:* rows never
@@ -170,8 +240,7 @@ def _build_patient_label(mrn, rows):
     has_avpc = 1 if avpc_date is not None else 0
 
     # NEPC precedence for timing: nepc_timeline_date wins whenever any NEPC
-    # criterion is present, regardless of whether AVPC also crossed threshold
-    # earlier.
+    # criterion is present, regardless of whether AVPC was also met earlier.
     if has_nepc_timeline:
         avpc_nepc_date = nepc_timeline_date
         defining_row = nepc_row
@@ -184,10 +253,9 @@ def _build_patient_label(mrn, rows):
 
     has_avpc_nepc = 1 if (has_avpc or has_nepc_timeline) else 0
 
-    # Undated-only-positive demotion: a patient whose AVPC threshold is
-    # reached only via undated evidence (no dated row ever reaches
-    # AVPC_THRESHOLD), and
-    # who has no dated/undated NEPC evidence either, is demoted to negative.
+    # Undated-only-positive demotion: a patient who meets the AVPC definition
+    # only once undated evidence is counted, and who has no dated/undated NEPC
+    # evidence either, is demoted to negative.
     # A patient with dated NEPC evidence is unaffected (NEPC already timed).
     # A patient with *only* undated NEPC evidence and no dated AVPC/NEPC
     # evidence is also demoted.
@@ -243,6 +311,13 @@ def _build_patient_label(mrn, rows):
         "confidence": confidence,
         "source_note_date": source_note_date,
         "label_source": label_source,
+        "metastatic_date": (
+            metastatic_row["event_date"] if metastatic_row is not None else None
+        ),
+        "castration_resistant_date": (
+            resistant_row["event_date"] if resistant_row is not None else None
+        ),
+        "avpc_gate_missing": avpc_gate_missing,
         "_demoted_undated_only": demoted_undated_only,
     }
 
@@ -283,16 +358,39 @@ def _print_summary(rows, n_demoted):
     n_avpc = sum(row["has_avpc"] for row in rows)
     n_nepc = sum(row["has_nepc_timeline"] for row in rows)
     n_union = sum(row["has_avpc_nepc"] for row in rows)
+    n_exempt = sum(
+        1
+        for row in rows
+        if row["has_avpc"] and row["castration_resistant_date"] is None
+    )
 
     print(f"Wrote {n_patients} patient labels")
     print(f"  AVPC-positive (has_avpc=1): {n_avpc}")
+    if n_exempt:
+        print(
+            f"    via small-cell histology without documented castration "
+            f"resistance: {n_exempt}"
+        )
     print(f"  NEPC-positive (has_nepc_timeline=1): {n_nepc}")
     print(f"  AVPC_NEPC union positive (has_avpc_nepc=1): {n_union}")
     if n_demoted:
         print(
-            f"  Demoted to negative (threshold only reached via undated "
+            f"  Demoted to negative (definition only met via undated "
             f"evidence): {n_demoted}"
         )
+
+    gate_failures = Counter(
+        " + ".join(row["avpc_gate_missing"])
+        for row in rows
+        if row["avpc_gate_missing"]
+    )
+    if gate_failures:
+        print(
+            "  Dated criterion but not castration-resistant metastatic "
+            f"disease (has_avpc=0): {sum(gate_failures.values())}"
+        )
+        for missing, count in gate_failures.most_common():
+            print(f"    missing {missing}: {count}")
 
     criteria_counts = Counter(row["n_avpc_criteria"] for row in rows)
     print("  n_avpc_criteria distribution:")

@@ -77,6 +77,13 @@ def test_binary_avpc_prompt_uses_the_canonical_c2_c3_contract():
     assert "visceral_and_bone" not in CLASSIFY_SYSTEM_PROMPT
 
 
+def test_binary_avpc_prompt_requires_castration_resistant_metastatic_disease():
+    assert "castration-resistant, metastatic prostate" in CLASSIFY_SYSTEM_PROMPT
+    assert "AVPC is castration-resistant, metastatic prostate" in CANONICAL_CRITERIA
+    for field in ("has_metastatic_disease", "has_castration_resistance"):
+        assert f'"{field}": true | false' in CLASSIFY_SYSTEM_PROMPT
+
+
 @pytest.mark.parametrize("collector", ["binary", "gleason", "nepc", "met_dx"])
 def test_prostate_parquet_collectors_require_an_explicit_cohort(tmp_path, collector):
     common = {
@@ -197,11 +204,25 @@ def test_binary_result_validation_rejects_malformed_and_ungrounded_output():
             "note_type": "Pathology",
             "trigger_categories": ["nepc"],
             "snippet": "The prostate biopsy shows small-cell neuroendocrine carcinoma.",
-        }
+        },
+        {
+            "note_date": "2024-02-01",
+            "note_type": "Imaging",
+            "trigger_categories": ["avpc"],
+            "snippet": "Bone scan shows widespread osseous metastases.",
+        },
+        {
+            "note_date": "2023-06-01",
+            "note_type": "Clinician",
+            "trigger_categories": ["avpc"],
+            "snippet": "No evidence of metastatic disease.",
+        },
     ]
     valid = {
         "primary_label": "nepc",
         "has_nepc": True,
+        # Small-cell histology needs metastatic disease but not castration
+        # resistance (Aparicio Table 1, footnote a).
         "has_avpc": True,
         "has_biomarker": False,
         "has_molecular_avpc": False,
@@ -209,6 +230,12 @@ def test_binary_result_validation_rejects_malformed_and_ungrounded_output():
         "biomarker_genes": [],
         "avpc_criteria": ["C1"],
         "visceral_met_pattern": "none",
+        "has_metastatic_disease": True,
+        "metastatic_quote": "Bone scan shows widespread osseous metastases.",
+        "metastatic_quote_date": "2024-02-01",
+        "has_castration_resistance": False,
+        "castration_resistance_quote": None,
+        "castration_resistance_quote_date": None,
         "non_prostate_primary_types": [],
         "supporting_quotes": [
             "The prostate biopsy shows small-cell neuroendocrine carcinoma."
@@ -229,27 +256,68 @@ def test_binary_result_validation_rejects_malformed_and_ungrounded_output():
         "supporting_quote_or_date_not_in_evidence"
     )
 
+    no_metastasis = {
+        "has_metastatic_disease": False,
+        "metastatic_quote": None,
+        "metastatic_quote_date": None,
+    }
+    for update, error in (
+        ({"has_castration_resistance": None}, "invalid_boolean:has_castration_resistance"),
+        # Without metastatic disease, small-cell histology is not AVPC.
+        (no_metastasis, "inconsistent_has_avpc"),
+        (
+            {"has_avpc": False, "has_metastatic_disease": False},
+            "state_quote_without_state:has_metastatic_disease",
+        ),
+        ({"metastatic_quote": " "}, "missing_state_quote:has_metastatic_disease"),
+        (
+            {"metastatic_quote": "Innumerable bone metastases."},
+            "state_quote_or_date_not_in_evidence:has_metastatic_disease",
+        ),
+        (
+            {"metastatic_quote_date": "2024-01-01"},
+            "state_quote_or_date_not_in_evidence:has_metastatic_disease",
+        ),
+        (
+            {
+                "metastatic_quote": "No evidence of metastatic disease.",
+                "metastatic_quote_date": "2023-06-01",
+            },
+            "state_quote_fails_gate:has_metastatic_disease:negated_or_hedged:no",
+        ),
+    ):
+        assert validate_result(dict(valid, **update), snippets)[1] == error
+
 
 def test_binary_result_normalization_repairs_deterministic_model_mistakes():
     quote = "Somatic testing found PTEN and TP53 alterations in the prostate tumor."
+    state_quote = (
+        "Metastatic castration-resistant prostate cancer with lytic bone metastases."
+    )
     snippets = [
         {
             "note_date": "2024-03-04",
             "note_type": "Pathology",
             "trigger_categories": ["avpc", "biomarker"],
-            "snippet": f"Aggressive variant prostate cancer. {quote}",
+            "snippet": f"Aggressive variant prostate cancer. {state_quote} {quote}",
         }
     ]
     malformed = {
         "primary_label": "conventional",
         "has_nepc": False,
-        "has_avpc": True,
+        "has_avpc": False,
         "has_biomarker": False,
         "has_molecular_avpc": False,
         "has_non_prostate_primary": False,
         "biomarker_genes": ["PTEN", "TP53"],
         "avpc_criteria": "C2",
         "visceral_met_pattern": "visceral_only",
+        "has_metastatic_disease": True,
+        "metastatic_quote": state_quote,
+        "metastatic_quote_date": "2024-01-01",
+        "has_castration_resistance": True,
+        "castration_resistance_quote": state_quote,
+        "castration_resistance_quote_date": None,
         "non_prostate_primary_types": [],
         "supporting_quotes": quote,
         "supporting_quote_dates": [],
@@ -259,13 +327,90 @@ def test_binary_result_normalization_repairs_deterministic_model_mistakes():
 
     normalized = _normalize_model_result(malformed, snippets)
 
+    # C2 with documented castration resistance meets the AVPC definition.
+    assert normalized["has_avpc"] is True
     assert normalized["primary_label"] == "avpc"
     assert normalized["has_molecular_avpc"] is True
     assert normalized["avpc_criteria"] == ["C2"]
     assert normalized["visceral_met_pattern"] == "none"
     assert normalized["supporting_quotes"] == [quote]
     assert normalized["supporting_quote_dates"] == ["2024-03-04"]
+    assert normalized["metastatic_quote_date"] == "2024-03-04"
+    assert normalized["castration_resistance_quote_date"] == "2024-03-04"
+    assert normalized["avpc_gate_reasons"] == []
     assert validate_result(normalized, snippets) == (normalized, None)
+
+
+def test_binary_state_quote_failing_the_mcrpc_gate_withdraws_the_state():
+    lytic = "Bone scan shows predominantly lytic osseous metastases."
+    trial = "Eligible for the phase 3 trial in mCRPC."
+    snippets = [
+        {
+            "note_date": "2024-02-01",
+            "note_type": "Imaging",
+            "trigger_categories": ["avpc"],
+            "snippet": lytic,
+        },
+        {
+            "note_date": "2024-03-01",
+            "note_type": "Clinician",
+            "trigger_categories": ["avpc"],
+            "snippet": trial,
+        },
+    ]
+    result = {
+        "primary_label": "avpc",
+        "has_nepc": False,
+        "has_avpc": True,
+        "has_biomarker": False,
+        "has_molecular_avpc": False,
+        "has_non_prostate_primary": False,
+        "biomarker_genes": [],
+        "avpc_criteria": ["C2"],
+        "visceral_met_pattern": "none",
+        "has_metastatic_disease": True,
+        "metastatic_quote": lytic,
+        "metastatic_quote_date": "2024-02-01",
+        "has_castration_resistance": True,
+        "castration_resistance_quote": trial,
+        "castration_resistance_quote_date": "2024-03-01",
+        "non_prostate_primary_types": [],
+        "supporting_quotes": [lytic],
+        "supporting_quote_dates": ["2024-02-01"],
+        "confidence": "high",
+        "rationale": "Lytic bone metastases in castration-resistant disease.",
+    }
+
+    normalized = _normalize_model_result(result, snippets)
+
+    # Trial eligibility text does not document castration resistance, so C2
+    # alone falls short of the definition.
+    assert normalized["has_castration_resistance"] is False
+    assert normalized["castration_resistance_quote"] is None
+    assert normalized["castration_resistance_quote_date"] is None
+    assert normalized["has_metastatic_disease"] is True
+    assert normalized["has_avpc"] is False
+    assert normalized["primary_label"] == "conventional"
+    assert normalized["avpc_gate_reasons"] == [
+        "state_quote_rejected:castration_resistant:boilerplate:eligible",
+        "missing_state:castration_resistant",
+    ]
+    assert validate_result(normalized, snippets) == (normalized, None)
+    row = make_row(1, len(snippets), normalized)
+    assert row["avpc_criteria"] == ["C2"]
+    assert row["has_castration_resistance"] is False
+    assert row["avpc_gate_reasons"] == normalized["avpc_gate_reasons"]
+
+    # An ungrounded state quote is not withdrawn: validation rejects it, so the
+    # model gets a correction retry.
+    ungrounded = dict(result, castration_resistance_quote="Castration-resistant since 2019.")
+    normalized = _normalize_model_result(ungrounded, snippets)
+    assert normalized["has_castration_resistance"] is True
+    assert normalized["has_avpc"] is True
+    assert normalized["avpc_gate_reasons"] == []
+    assert validate_result(normalized, snippets)[1] == (
+        "state_quote_or_date_not_in_evidence:has_castration_resistance"
+    )
 
 
 def test_binary_classifier_retries_ungrounded_and_truncated_output_with_feedback():
@@ -281,13 +426,20 @@ def test_binary_classifier_retries_ungrounded_and_truncated_output_with_feedback
     valid = {
         "primary_label": "nepc",
         "has_nepc": True,
-        "has_avpc": True,
+        # Small-cell histology without documented metastases is not AVPC.
+        "has_avpc": False,
         "has_biomarker": False,
         "has_molecular_avpc": False,
         "has_non_prostate_primary": False,
         "biomarker_genes": [],
         "avpc_criteria": ["C1"],
         "visceral_met_pattern": "none",
+        "has_metastatic_disease": False,
+        "metastatic_quote": None,
+        "metastatic_quote_date": None,
+        "has_castration_resistance": False,
+        "castration_resistance_quote": None,
+        "castration_resistance_quote_date": None,
         "non_prostate_primary_types": [],
         "supporting_quotes": [quote],
         "supporting_quote_dates": ["2024-01-01"],
@@ -314,7 +466,7 @@ def test_binary_classifier_retries_ungrounded_and_truncated_output_with_feedback
     )
 
     assert error is None
-    assert result == valid
+    assert result == dict(valid, avpc_gate_reasons=["missing_state:metastatic"])
     assert len(provider.calls) == 3
     assert "truncated_response" in provider.calls[1][-1]["content"]
     assert "supporting_quote_or_date_not_in_evidence" in (
@@ -341,6 +493,12 @@ def test_only_brca1_or_brca2_assigns_the_biomarker_primary_label():
         "biomarker_genes": ["PALB2"],
         "avpc_criteria": [],
         "visceral_met_pattern": "none",
+        "has_metastatic_disease": False,
+        "metastatic_quote": None,
+        "metastatic_quote_date": None,
+        "has_castration_resistance": False,
+        "castration_resistance_quote": None,
+        "castration_resistance_quote_date": None,
         "non_prostate_primary_types": [],
         "supporting_quotes": [
             "Tumor sequencing identified a somatic PALB2 alteration."

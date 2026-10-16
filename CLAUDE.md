@@ -234,7 +234,7 @@ payload_max_chars)` and `SNIPPET_PROFILES`:
 | `BINARY_NEPC_OUTPUT_DIR` | `<data_path>/LLM_NEPC_labels/` |
 | `STAGE_OUTPUT_DIR` | `/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/` |
 | `CAIA_AZURE_OPENAI_ENDPOINT` / `_API_VERSION` / `_MODEL` | DFCI Azure OpenAI endpoint / `2024-04-01-preview` / `gpt-4o` |
-| `VERTEX_PROJECT` / `VERTEX_LOCATION` / `VERTEX_MODEL` | `gusevlabllm` / `us-central1` / `gemini-3.5-flash-lite` |
+| `VERTEX_PROJECT` / `VERTEX_LOCATION` / `VERTEX_MODEL` | `gusevlabllm` / `us` (multi-region; Gemini 3+ isn't served in single US regions) / `gemini-3.5-flash-lite` |
 
 The legacy `CAIA_COMPASS_*` env vars are still accepted as fallbacks for the
 data-path variables.

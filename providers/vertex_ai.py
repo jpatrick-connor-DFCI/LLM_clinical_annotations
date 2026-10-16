@@ -22,7 +22,12 @@ except ImportError as error:
 name = "vertex_ai"
 
 VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "gusevlabllm")
-VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
+# Gemini 3+ is not served from single regions such as us-central1 (404
+# NOT_FOUND for project gusevlabllm in every US region, 2026-10-16). The "us"
+# multi-region serves it and, unlike "global", keeps processing in the US,
+# which matters for clinical notes.
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us")
+_MULTI_REGION_LOCATIONS = ("us", "eu")
 default_model = os.environ.get("VERTEX_MODEL", "gemini-3.5-flash-lite")
 
 # Gemini 2.5+ counts thinking against max_output_tokens (up to 8K on Flash and
@@ -47,10 +52,18 @@ def build_client():
         raise ImportError(
             "Vertex AI note extraction requires google-genai in the active environment."
         ) from GENAI_IMPORT_ERROR
+    http_options = None
+    if VERTEX_LOCATION in _MULTI_REGION_LOCATIONS:
+        # Older google-genai releases build "<location>-aiplatform.googleapis.com",
+        # which does not exist for a multi-region; name the endpoint explicitly.
+        http_options = genai_types.HttpOptions(
+            base_url=f"https://aiplatform.{VERTEX_LOCATION}.rep.googleapis.com/"
+        )
     return genai.Client(
         vertexai=True,
         project=VERTEX_PROJECT,
         location=VERTEX_LOCATION,
+        http_options=http_options,
     )
 
 

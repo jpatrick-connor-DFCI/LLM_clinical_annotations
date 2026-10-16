@@ -78,6 +78,56 @@ TRIGGER_REGEX = {
 }
 
 
+# Triggers for the per-note NEPC diagnosis pipeline (tasks/nepc). Narrower than
+# TRIGGER_REGEX["nepc"]: bare "transform..." and "dedifferentiat..." matched
+# mostly unrelated text ("transformed lymphoma", "transformation of care"), so
+# only the neuroendocrine vocabulary and the NE IHC markers remain.
+NEPC_DX_TRIGGER_REGEX = {
+    "nepc_dx": (
+        r"\b(?:"
+        r"neuro[\s-]?endocrine|nepc|t-?nepc|"
+        r"small[\s-]?cell|scpc|scnc|oat[\s-]?cell|"
+        r"transdifferentiat(?:e|ed|ion|ing)|lineage\s+plasticity|"
+        r"synaptophysin|chromogranin|cd\s?56|insm-?1|neuron[\s-]+specific\s+enolase|nse"
+        r")\b"
+    ),
+}
+
+_BARE_TRANSFORM = r"transform(?:ation|ed|ing)(?:\s+(?:to|into))?|"
+assert _BARE_TRANSFORM in TRIGGER_REGEX["nepc"]
+
+# Triggers for the per-note AVPC pipeline (tasks/avpc). Deliberately broad:
+# composite Aparicio criteria are completed from facts in separate notes (a
+# Gleason-only pathology report, a PSA in a clinic note, a bone scan count), so
+# every atomic fact family the prompt extracts must be able to pull a note in.
+AVPC_TRIGGER_REGEX = {
+    "nepc": TRIGGER_REGEX["nepc"].replace(_BARE_TRANSFORM, ""),
+    "avpc": TRIGGER_REGEX["avpc"],
+    "avpc_atomic": (
+        r"\b(?:gleason|grade\s+group|isup(?:\s+grade)?|"
+        r"bone\s+met(?:astases|astasis|astatic)?|osseous\s+met(?:astases|astasis|astatic)?|"
+        r"no\s+(?:evidence\s+of\s+)?(?:bone|osseous)\s+(?:metastases|metastatic\s+disease|disease)|"
+        r"psa|prostate[- ]specific\s+antigen|ldh|lactate\s+dehydrogenase|"
+        r"cea|carcinoembryonic\s+antigen|calcium|hypercalc(?:emia|aemia)|"
+        r"crpc|castration[- ]resistant|hormonal\s+therapy|androgen\s+deprivation|"
+        r"lupron|leuprolide|degarelix|relugolix)\b"
+    ),
+    "avpc_sites_therapy": (
+        r"\b(?:metasta\w*|mets|n?mcrpc|mhspc|mcspc|m1[abc]?|"
+        r"(?:liver|hepatic|lung|pulmonary|adrenal|brain|pleural|peritoneal)\s+"
+        r"(?:lesions?|nodules?|masses?|disease)|"
+        r"lymphadenopathy|adenopathy|"
+        r"lytic|osteolytic|blastic|osteoblastic|sclerotic|superscan|"
+        r"too\s+numerous\s+to\s+count|"
+        r"castrat\w*|hormone[\s-]+(?:refractory|resistant|sensitive)|"
+        r"goserelin|zoladex|triptorelin|trelstar|firmagon|orgovyx|eligard|orchiectomy|"
+        r"abiraterone|zytiga|enzalutamide|xtandi|apalutamide|erleada|"
+        r"darolutamide|nubeqa)\b"
+    ),
+}
+assert AVPC_TRIGGER_REGEX["nepc"] != TRIGGER_REGEX["nepc"]
+
+
 def combined_text_pattern(trigger_regex):
     """Build one case-insensitive parquet candidate regex from labeled patterns."""
     return "(?i)(?:" + "|".join(trigger_regex.values()) + ")"
@@ -104,7 +154,10 @@ def find_trigger_matches(text, trigger_regex=TRIGGER_REGEX):
     return sorted(matches, key=lambda item: (item[1], item[2]))
 
 
-def build_snippet(text, matches, *, context_chars=750, max_chars=300_000):
+def build_snippet(
+    text, matches, *, context_chars=750, max_chars=300_000,
+    gap_chars=SNIPPET_GAP_CHARS,
+):
     """Build a snippet string around trigger matches.
 
     Callers pass sizing explicitly, typically from a `SnippetProfile`
@@ -115,7 +168,7 @@ def build_snippet(text, matches, *, context_chars=750, max_chars=300_000):
         return ""
     windows = [(max(0, s - context_chars), min(len(text), e + context_chars)) for _, s, e in matches]
     parts = []
-    for start, end in merge_windows(windows):
+    for start, end in merge_windows(windows, gap_chars=gap_chars):
         snippet = text[start:end].strip()
         if not snippet:
             continue

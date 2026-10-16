@@ -28,6 +28,10 @@ tasks/              One directory per extraction task, each with a system
   cancer_stage/          Cancer stage timeline extraction.
   gleason_score/         Gleason score / grade group timeline extraction.
   longitudinal_subtype/  AVPC (Aparicio criteria) / NEPC feature timelines.
+  nepc/                  Per-note NEPC vs non-NEPC diagnosis, quote, and date.
+  avpc/                  Per-note AVPC: metastatic, CRPC, and C1-C7 (paper
+                         numbering), each with its own quote and date.
+  note_extraction.py     Shared one-call-per-note runner used by nepc/ and avpc/.
 
 notebooks/          One notebook per task with a PROVIDER toggle. Each notebook
                     subprocess-calls the preprocessing CLIs, then the task's
@@ -76,7 +80,7 @@ Parquet; configure this with `--max-output-correction-retries`.
 
 Every preprocessing CLI and task runner supports `--help`.
 
-The binary subtype, Gleason, and longitudinal subtype collectors are
+The binary subtype, Gleason, longitudinal subtype, NEPC, and AVPC collectors are
 prostate-specific. Their default cohort is
 `$COMPASS_PATH/mrn_lists/adt_mrns.csv`; `--mrns` or
 `--mrn-file` can override it. Only the cancer-stage collector defaults to the
@@ -116,6 +120,75 @@ python tasks/longitudinal_subtype/build_nepc_timeline.py \
 To regenerate the timeline after output-format changes without any LLM calls or
 failure retries, use `build_nepc_timeline.py --rebuild-timeline-only` with the
 same output directory, provider/model, and MRN cohort settings as the saved run.
+
+### NEPC and AVPC (per-note pipelines)
+
+Two standalone pipelines that sit alongside `binary_subtype` and
+`longitudinal_subtype`. Both make **one LLM call per deduplicated trigger
+note**. The model reports only atomic findings, each with a verbatim quote and
+the date as written. Note date, type, and id come from the evidence row, never
+from the model. Quotes must ground in their own note (minimum 8 characters).
+Failures go to `<prefix>_rejected_findings.parquet` without losing the note's
+other findings.
+
+Labels use the stored findings and source evidence: negation/hedge gates,
+numeric thresholds, and timing rules run in code at rollup time. So
+`--rebuild-labels-only` re-applies a changed gate with no LLM calls.
+
+Clinical-trial eligibility, inclusion/exclusion lists, protocol titles, and
+generic participant requirements are screened for every finding, including
+numeric AVPC components. The runner also checks the quote's location in its
+source evidence: a short quote taken from an eligibility section is rejected
+even if it omits the heading. Outside such sections, a trial mention blocks
+only its own clause, and only research-specific wording counts ("trial",
+"enrolled", "NCT…", "phase II", "protocol 21-123"). So "Liver biopsy showed
+small cell carcinoma; enrolled on NCT0123" keeps its diagnosis, and ordinary
+uses like "per CAP protocol" or "the prior study of 3/2021" veto nothing. The
+NEPC prompt also names trial text as a common false flag and asks for quotes
+taken from the patient's own diagnosis rather than the trial description.
+Both collectors preserve eligibility headings and clinical section boundaries
+when building snippets. A separate patient assessment in the same note remains
+usable. These exclusions appear as `boilerplate:*` in `gate_rejections`, and
+the guard version is recorded in the labels metadata.
+Label-only rebuilds use the saved evidence to reapply this context check.
+
+Dates keep the precision stated in the text (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`).
+A stated date later than its own note is rejected. Resume is per note:
+`--retry-failures` re-calls only notes whose last attempt failed.
+
+```bash
+# NEPC: nepc_status, nepc_quote, nepc_date (+ source/precision), and a strict
+# has_stated_nepc_dx tier. Pathology reports are kept whole when they fit;
+# overlong reports retain their header and trigger passages within the cap.
+python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/nepc
+python tasks/nepc/run_nepc_extraction.py --output-dir /path/to/nepc --provider vertex_ai
+
+# AVPC: is_metastatic / is_castration_resistant / is_mcrpc, then cN_met,
+# cN_quote, cN_date for C1-C7, component quotes for the composite criteria,
+# and is_avpc / avpc_date.
+python preprocessing/cli/collect_avpc_notes.py --output-dir /path/to/avpc
+python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/avpc --provider vertex_ai
+```
+
+**The new AVPC pipeline follows Aparicio et al. 2013's numbering**: C2 =
+exclusively visceral, C3 = predominantly lytic bone. This is the reverse of
+`binary_subtype` and `longitudinal_subtype`.
+
+`is_avpc` requires metastatic disease, castration resistance, and at least one
+criterion. C1 (small cell) is exempt from the castration-resistance
+requirement. Metastatic status can be implied by C2, C3, or C5, and castration
+resistance by C7.
+
+Before calling the LLM, the collectors print notes and characters per note
+type. AVPC's triggers are intentionally broad, so check that summary to size
+cost first.
+
+In either notebook, setting `MRNS` restricts extraction to that pilot subset;
+the cohort file still defines the full label denominator. AVPC and NEPC
+evidence v2 retain trial section context; NEPC also adds supported marker
+spellings and preserves late pathology addenda. Existing v1 evidence must be
+recollected with `--overwrite` and then extracted again to include context,
+notes, and passages omitted by the old collectors.
 
 ## Setup
 

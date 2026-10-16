@@ -23,7 +23,7 @@ name = "vertex_ai"
 
 VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "gusevlabllm")
 VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
-default_model = os.environ.get("VERTEX_MODEL", "gemini-2.0-flash-001")
+default_model = os.environ.get("VERTEX_MODEL", "gemini-3.5-flash-lite")
 
 # Gemini 2.5+ counts thinking against max_output_tokens (up to 8K on Flash and
 # Flash-Lite), so leave another 8K for JSON. Models before 2.5 cap output at 8K.

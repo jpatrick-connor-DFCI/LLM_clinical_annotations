@@ -26,6 +26,13 @@ python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out -
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
 python tasks/longitudinal_subtype/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
+# Per-note NEPC / AVPC: collect trigger notes, then one LLM call per note
+python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out
+python tasks/nepc/run_nepc_extraction.py --output-dir /path/to/out --provider vertex_ai
+python preprocessing/cli/collect_avpc_notes.py --output-dir /path/to/out
+python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/out --provider vertex_ai
+python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/out --rebuild-labels-only  # re-gate, no LLM
+
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
@@ -146,6 +153,56 @@ Every task is split into a **preprocessing** step and a **task runner**:
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.
 
+### Per-note pipelines (`tasks/nepc`, `tasks/avpc`)
+
+These are a separate design from the chunked pipelines above, and are
+unchanged by them.
+
+**Collectors.** `preprocessing/evidence.py::collect_note_evidence` writes one
+evidence row per deduplicated trigger note. There is no chunk packing. It
+optionally takes a per-note-type context override: NEPC uses
+`{"Pathology": None}` to keep whole pathology reports. That override is hashed
+into the scan config only when it is set, so existing scan hashes are
+unchanged. Reports longer than the per-note cap retain the header and every
+trigger passage with reduced context instead of truncating their beginning.
+Both per-note collectors preserve eligibility headings and clinical reset
+headings around snippets. AVPC/NEPC evidence v2 invalidate earlier evidence
+that omitted that context; NEPC also fixes marker spellings and late addenda.
+
+**Runner.** `tasks/note_extraction.py` is the shared runner, configured by a
+`TaskSpec`.
+
+- It makes one call per note, with one correction retry on unparseable output.
+- It grounds each quote against that note.
+- It keeps a per-note ledger (`<prefix>_processed_notes.parquet`), compacted to
+  each note's final attempt.
+- It persists a run fingerprint covering evidence, model, prompt, and finding
+  schema.
+
+**Labels.** Labels are built at rollup time from the stored findings.
+
+- `tasks/nepc/ne_gate.py` screens NE quotes. The negation window is
+  sentence-bounded. IHC polarity is read per marker, and a "positive for" or
+  "negative for" cue binds only forward.
+- `tasks/avpc/criteria.py` applies Aparicio thresholds, pairings, and C7
+  interval rules. Every number is re-checked against its quote.
+- Both reuse `mcrpc_gate` and `met_veto` from `longitudinal_subtype`.
+- `tasks/trial_guard.py` rejects trial/eligibility text for every finding.
+  At label-build time, the runner also locates quotes in their source evidence
+  to detect cropped text from eligibility sections; a separate clinical
+  assessment remains usable. Outside those sections a trial cue blocks only
+  its own clause. Its regex (`TRIAL_CUE`) is deliberately narrower than
+  `met_veto.BOILERPLATE`, which also matches clinical uses such as "per CAP
+  protocol" or "prior study of". These transient context reasons do not change
+  the stored extraction rows and are recomputed on label-only rebuilds.
+- Gate and criteria versions go into `<prefix>_labels.meta.parquet`, not into
+  the extraction fingerprint. So `--rebuild-labels-only` re-applies them
+  without LLM calls. The metadata also records `trial_guard_version`.
+
+**C2/C3 numbering.** `tasks/avpc` uses the paper's C2/C3 numbering: C2 =
+exclusively visceral, C3 = lytic. This is the reverse of `binary_subtype` and
+`longitudinal_subtype`.
+
 All repository-owned persisted I/O uses Zstandard-compressed Parquet, including
 evidence, snippet bundles, run/scan metadata, processed ledgers, rejected or
 failed rows, raw findings, and final timelines/labels. JSON is restricted to
@@ -177,7 +234,7 @@ payload_max_chars)` and `SNIPPET_PROFILES`:
 | `BINARY_NEPC_OUTPUT_DIR` | `<data_path>/LLM_NEPC_labels/` |
 | `STAGE_OUTPUT_DIR` | `/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/` |
 | `CAIA_AZURE_OPENAI_ENDPOINT` / `_API_VERSION` / `_MODEL` | DFCI Azure OpenAI endpoint / `2024-04-01-preview` / `gpt-4o` |
-| `VERTEX_PROJECT` / `VERTEX_LOCATION` / `VERTEX_MODEL` | `gusevlabllm` / `us-central1` / `gemini-2.0-flash-001` |
+| `VERTEX_PROJECT` / `VERTEX_LOCATION` / `VERTEX_MODEL` | `gusevlabllm` / `us-central1` / `gemini-3.5-flash-lite` |
 
 The legacy `CAIA_COMPASS_*` env vars are still accepted as fallbacks for the
 data-path variables.

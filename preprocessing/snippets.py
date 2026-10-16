@@ -19,12 +19,68 @@ from preprocessing.utils import clean_note
 _BINARY_SUBTYPE_PROFILE = SNIPPET_PROFILES["binary_subtype"]
 
 
-def _scan_note_row(row, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX):
+def _resolve_context_chars(note_type, cleaned, context_chars, context_overrides):
+    """Per-note-type context width; an override of None keeps the whole note."""
+    if not context_overrides or note_type not in context_overrides:
+        return context_chars
+    override = context_overrides[note_type]
+    return len(cleaned) if override is None else override
+
+
+def _bounded_note_snippet(cleaned, matches, context_chars, max_chars, *, keep_header=False):
+    """Keep every trigger and context anchor, shrinking surrounding context.
+
+    Whole-report overrides additionally preserve the source header. An
+    eligibility heading and its clinical reset must survive alongside the
+    diagnosis mentions they govern, even when their normal windows exceed
+    the per-note budget.
+    """
+    anchors = list(matches)
+    if keep_header:
+        header_end = min(context_chars, max_chars // 4)
+        anchors.insert(0, ("_header", 0, header_end))
+
+    def render(width):
+        # Disable head truncation while measuring candidates; each separate
+        # window adds at most 13 characters of ellipses and separators.
+        return build_snippet(
+            cleaned, anchors, context_chars=width,
+            max_chars=len(cleaned) + 13 * len(anchors), gap_chars=0,
+        )
+
+    snippet = render(0)
+    if len(snippet) > max_chars:
+        raise ValueError(
+            "The note's required context and trigger spans exceed snippet_max_chars; "
+            "increase the per-note limit rather than discarding evidence."
+        )
+    low, high = 0, context_chars
+    while low <= high:
+        width = (low + high) // 2
+        candidate = render(width)
+        if len(candidate) <= max_chars:
+            snippet = candidate
+            low = width + 1
+        else:
+            high = width - 1
+    return snippet
+
+
+def _scan_note_row(
+    row, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX,
+    context_overrides=None, preserve_trial_context=False,
+):
     """Clean, trigger-scan, and snippet a single note row.
 
     Returns a candidate dict (mrn + snippet metadata) or None if the note has no
     usable text or no trigger hit. Module-level so it can be pickled by a
     ProcessPoolExecutor worker.
+
+    `context_overrides` maps NOTE_TYPE to a context width for that type, where
+    None means the whole cleaned note. Oversized whole reports retain their
+    header and trigger windows within `snippet_max_chars`.
+    `preserve_trial_context` retains eligibility and clinical reset headings
+    so downstream quote screening can distinguish trial criteria from diagnoses.
     """
     note_text = row.get("CLINICAL_TEXT") or ""
     note_type = row.get("NOTE_TYPE") or "Unknown"
@@ -34,12 +90,37 @@ def _scan_note_row(row, *, context_chars, snippet_max_chars, trigger_regex=TRIGG
     matches = find_trigger_matches(cleaned, trigger_regex)
     if not matches:
         return None
-    snippet = build_snippet(
-        cleaned,
-        matches,
-        context_chars=context_chars,
-        max_chars=snippet_max_chars,
+    snippet_matches = matches
+    if preserve_trial_context:
+        from tasks.trial_guard import TrialContext
+
+        snippet_matches = [
+            *matches,
+            *(("_trial_context", start, end)
+              for start, end in TrialContext(cleaned).context_anchors),
+        ]
+    whole_note = (
+        context_overrides is not None
+        and note_type in context_overrides
+        and context_overrides[note_type] is None
     )
+    if whole_note and len(cleaned) > snippet_max_chars:
+        snippet = _bounded_note_snippet(
+            cleaned, snippet_matches, context_chars, snippet_max_chars, keep_header=True,
+        )
+    else:
+        width = _resolve_context_chars(note_type, cleaned, context_chars, context_overrides)
+        snippet = build_snippet(
+            cleaned,
+            snippet_matches,
+            context_chars=width,
+            max_chars=(len(cleaned) + 13 * len(snippet_matches))
+            if preserve_trial_context else snippet_max_chars,
+        )
+        if preserve_trial_context and len(snippet) > snippet_max_chars:
+            snippet = _bounded_note_snippet(
+                cleaned, snippet_matches, width, snippet_max_chars,
+            )
     if not snippet:
         return None
     return {
@@ -53,7 +134,10 @@ def _scan_note_row(row, *, context_chars, snippet_max_chars, trigger_regex=TRIGG
     }
 
 
-def _scan_note_chunk(rows, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX):
+def _scan_note_chunk(
+    rows, *, context_chars, snippet_max_chars, trigger_regex=TRIGGER_REGEX,
+    context_overrides=None, preserve_trial_context=False,
+):
     """Scan a list of note rows in one worker call (amortizes IPC overhead)."""
     out = []
     for row in rows:
@@ -62,6 +146,8 @@ def _scan_note_chunk(rows, *, context_chars, snippet_max_chars, trigger_regex=TR
             context_chars=context_chars,
             snippet_max_chars=snippet_max_chars,
             trigger_regex=trigger_regex,
+            context_overrides=context_overrides,
+            preserve_trial_context=preserve_trial_context,
         )
         if candidate is not None:
             out.append(candidate)
@@ -81,6 +167,8 @@ def scan_note_candidates(
     max_workers=None,
     trigger_regex=TRIGGER_REGEX,
     progress_desc="Scanning notes",
+    context_overrides=None,
+    preserve_trial_context=False,
 ):
     """Clean + trigger-scan + snippet every note, in parallel across processes.
 
@@ -90,6 +178,8 @@ def scan_note_candidates(
 
     `trigger_regex` is a plain {label: pattern_str} dict (not compiled `re`
     objects), so it pickles cleanly across the ProcessPoolExecutor boundary.
+    `context_overrides` ({note_type: chars or None}) is passed to _scan_note_row.
+    `preserve_trial_context` is opt-in for the per-note extraction pipelines.
     """
     rows = list(notes_df.iter_rows(named=True))
     if not rows:
@@ -116,6 +206,8 @@ def scan_note_candidates(
                         context_chars=context_chars,
                         snippet_max_chars=snippet_max_chars,
                         trigger_regex=trigger_regex,
+                        context_overrides=context_overrides,
+                        preserve_trial_context=preserve_trial_context,
                     )
                 )
                 progress.update(len(chunk))
@@ -134,6 +226,8 @@ def scan_note_candidates(
                     context_chars=context_chars,
                     snippet_max_chars=snippet_max_chars,
                     trigger_regex=trigger_regex,
+                    context_overrides=context_overrides,
+                    preserve_trial_context=preserve_trial_context,
                 ),
                 chunks,
             )

@@ -126,6 +126,8 @@ def iter_note_snippets(
     context_chars=_LONGITUDINAL_PROFILE.context_chars,
     snippet_max_chars=_LONGITUDINAL_PROFILE.max_chars,
     max_workers=1,
+    context_overrides=None,
+    preserve_trial_context=False,
 ):
     """Yield one snippet dict per trigger-bearing note, deduplicated per patient.
 
@@ -146,6 +148,8 @@ def iter_note_snippets(
         snippet_max_chars=snippet_max_chars,
         max_workers=max_workers,
         trigger_regex=trigger_regex,
+        context_overrides=context_overrides,
+        preserve_trial_context=preserve_trial_context,
     )
     yield from dedupe_candidates(candidates)
 
@@ -327,6 +331,8 @@ def evidence_scan_config_key(
     snippet_max_chars,
     payload_max_chars,
     note_types=None,
+    context_overrides=None,
+    preserve_trial_context=False,
 ):
     """Fingerprint every RESOLVED setting that determines evidence chunk assignment.
 
@@ -342,6 +348,11 @@ def evidence_scan_config_key(
     `note_types` is the note-type filter applied to `notes_df` before scanning
     (or None/empty for "all types"); it's included because it changes which
     notes are eligible even though it doesn't change any numeric knob.
+
+    `context_overrides` ({note_type: chars or None}) is hashed only when set, so
+    fingerprints of evidence built without overrides are unchanged.
+    Trial-context preservation and its guard version are likewise hashed only
+    when enabled, leaving legacy collectors' fingerprints unchanged.
     """
     hasher = hashlib.sha256()
     for name in ("DFCI_MRN", "EVENT_DATE", "NOTE_TYPE", "CLINICAL_TEXT"):
@@ -362,6 +373,12 @@ def evidence_scan_config_key(
             normalized_note_types,
         )).encode()
     )
+    if context_overrides:
+        hasher.update(repr(sorted(context_overrides.items())).encode())
+    if preserve_trial_context:
+        from tasks.trial_guard import TRIAL_GUARD_VERSION
+
+        hasher.update(repr(("preserve_trial_context", True, TRIAL_GUARD_VERSION)).encode())
     return hasher.hexdigest()[:16]
 
 

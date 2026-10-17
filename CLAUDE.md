@@ -256,4 +256,8 @@ PROFILE_DATA parquet basenames. This drives both cleaning rules
 `notebooks/<task>.ipynb` is the primary way to run a task end to end: set the
 `PROVIDER` toggle, flip on the `RUN_*` cells you need, run top to bottom. Each
 notebook subprocess-calls the relevant `preprocessing/cli/` script(s) and then
-the task's runner with `--provider PROVIDER`.
+the task's runner with `--provider PROVIDER`. The exception is
+`primary_subtype.ipynb`, which makes no LLM calls. It full-joins
+`nepc_labels` and `avpc_labels` and adds a single `primary_label` column
+(NEPC > AVPC > conventional). That column is null whenever a higher-precedence
+label is unresolved.

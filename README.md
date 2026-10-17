@@ -179,6 +179,15 @@ criterion. C1 (small cell) is exempt from the castration-resistance
 requirement. Metastatic status can be implied by C2, C3, or C5, and castration
 resistance by C7.
 
+`notebooks/primary_subtype.ipynb` merges the full NEPC and AVPC label tables
+into `primary_subtype_labels.parquet`. It makes no LLM calls. It adds one
+column, `primary_label`: `nepc` if NEPC is positive, else `avpc` if `is_avpc`,
+else `conventional`. A patient is labelled `avpc` or `conventional` only when
+every higher-precedence label resolved negative. If either pipeline failed, did
+not run, or lacks the patient, `primary_label` stays null. The two columns both
+tables share get a `nepc_` / `avpc_` prefix: `review_status` and
+`gate_rejections`.
+
 Before calling the LLM, the collectors print notes and characters per note
 type. AVPC's triggers are intentionally broad, so check that summary to size
 cost first.

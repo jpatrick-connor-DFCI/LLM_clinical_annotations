@@ -13,7 +13,7 @@ from preprocessing.bundles.snippet_bundle import (  # noqa: E402
     write_snippet_bundle,
 )
 from preprocessing.config import (  # noqa: E402
-    DEFAULT_ADT_MRN_CSV,
+    DEFAULT_PROSTATE_MRN_CSV,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_PROFILE_NOTE_PATHS,
     SNIPPET_PROFILES,
@@ -40,9 +40,9 @@ def parse_args():
     parser.add_argument(
         "--mrn-file",
         type=Path,
-        default=DEFAULT_ADT_MRN_CSV,
+        default=DEFAULT_PROSTATE_MRN_CSV,
         help="CSV cohort file containing DFCI_MRN values; defaults to the "
-             "COMPASS ADT cohort.",
+             "COMPASS ICD prostate cohort.",
     )
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,

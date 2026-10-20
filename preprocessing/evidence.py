@@ -295,7 +295,7 @@ def add_collector_args(parser, *, default_output_dir, default_mrn_file, default_
         type=Path,
         default=default_mrn_file,
         help="CSV cohort file containing DFCI_MRN values; defaults to the "
-             "COMPASS ADT cohort.",
+             "COMPASS ICD prostate cohort.",
     )
     parser.add_argument("--mrns", default=None)
     parser.add_argument("--notes-parquet", type=Path, action="append", default=None,

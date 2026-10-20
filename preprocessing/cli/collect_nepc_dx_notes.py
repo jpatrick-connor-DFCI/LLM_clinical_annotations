@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import (  # noqa: E402
-    DEFAULT_ADT_MRN_CSV,
+    DEFAULT_PROSTATE_MRN_CSV,
     DEFAULT_DATA_PATH,
     NEPC_DX_EVIDENCE_SCHEMA_VERSION,
     SNIPPET_PROFILES,
@@ -56,7 +56,7 @@ def parse_args():
     add_collector_args(
         parser,
         default_output_dir=DEFAULT_OUTPUT_DIR,
-        default_mrn_file=DEFAULT_ADT_MRN_CSV,
+        default_mrn_file=DEFAULT_PROSTATE_MRN_CSV,
         default_context_chars=DEFAULT_CONTEXT_CHARS,
     )
     args = parser.parse_args()

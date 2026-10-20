@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from preprocessing.config import (  # noqa: E402
-    DEFAULT_ADT_MRN_CSV,
+    DEFAULT_PROSTATE_MRN_CSV,
     DEFAULT_PROFILE_NOTE_PATHS,
     DEFAULT_OUTPUT_DIR,
     NOTE_BUNDLE_FILENAME,
@@ -44,9 +44,9 @@ def parse_args():
     parser.add_argument(
         "--mrn-file",
         type=Path,
-        default=DEFAULT_ADT_MRN_CSV,
+        default=DEFAULT_PROSTATE_MRN_CSV,
         help="CSV cohort file containing the prostate DFCI_MRN values; defaults "
-             "to the COMPASS ADT cohort.",
+             "to the COMPASS ICD prostate cohort.",
     )
     return parser.parse_args()
 

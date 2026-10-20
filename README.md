@@ -82,7 +82,7 @@ Every preprocessing CLI and task runner supports `--help`.
 
 The binary subtype, Gleason, longitudinal subtype, NEPC, and AVPC collectors are
 prostate-specific. Their default cohort is
-`$COMPASS_PATH/mrn_lists/adt_mrns.csv`; `--mrns` or
+`$COMPASS_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; `--mrns` or
 `--mrn-file` can override it. Only the cancer-stage collector defaults to the
 full pan-cancer cohort.
 
@@ -220,7 +220,7 @@ Raw clinical text and every pipeline-owned evidence, state, metadata, failure,
 and result artifact are stored as Zstandard-compressed Parquet. JSON remains
 only as the LLM wire format or as a value inside a Parquet audit column.
 The default MRN cohort is
-`$COMPASS_PATH/mrn_lists/adt_mrns.csv`; externally
+`$COMPASS_PATH/mrn_lists/icd_prostate_mrn_flags.csv`; externally
 supplied overrides also use CSV with a `DFCI_MRN` column.
 
 The native PROFILE text rows are consumed exactly as emitted by

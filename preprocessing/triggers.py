@@ -128,6 +128,46 @@ AVPC_TRIGGER_REGEX = {
 assert AVPC_TRIGGER_REGEX["nepc"] != TRIGGER_REGEX["nepc"]
 
 
+# Triggers for the shared disease-course extraction (tasks/disease_course),
+# which feeds the BCR, progression and mCRPC builders. Polars evaluates the
+# combined pattern with the Rust regex engine, so no lookaround. Bare
+# "progress" is excluded: "progress note" is in nearly every clinic note.
+COURSE_TRIGGER_REGEX = {
+    "course_psa": r"\b(?:psa|prostate[\s-]+specific\s+antigen)\b",
+    "course_local_therapy": (
+        r"\b(?:prostatectomy|ralp|rarp|rrp|lrp|"
+        r"radiation(?:\s+therapy)?|radiotherapy|xrt|imrt|ebrt|sbrt|"
+        r"brachytherapy|proton|seed\s+implant|"
+        r"salvage|adjuvant)\b"
+    ),
+    "course_systemic_therapy": (
+        r"\b(?:adt|androgen\s+deprivation|lupron|leuprolide|eligard|"
+        r"goserelin|zoladex|triptorelin|trelstar|histrelin|vantas|"
+        r"degarelix|firmagon|relugolix|orgovyx|orchiectomy|"
+        r"bicalutamide|casodex|flutamide|nilutamide|"
+        r"abiraterone|zytiga|enzalutamide|xtandi|apalutamide|erleada|"
+        r"darolutamide|nubeqa|docetaxel|taxotere|cabazitaxel|jevtana|"
+        r"radium(?:[\s-]+223)?|xofigo|lutetium|lu[\s-]?177|pluvicto|"
+        r"sipuleucel(?:-t)?|provenge|olaparib|rucaparib|niraparib|talazoparib|"
+        r"carboplatin|cisplatin)\b"
+    ),
+    "course_recurrence": (
+        r"\b(?:recurren\w*|recurred|relapse\w*|biochemical(?:ly)?\s+(?:failure|recurren\w*|progression)|"
+        r"bcr|phoenix|nadir|"
+        r"progress(?:ion|ed|ing|ive)|rising\s+psa|psa\s+(?:rise|rising|rose)|"
+        r"doubling\s+time|psadt|new\s+(?:lesions?|metasta\w*|foci))\b"
+    ),
+    "course_imaging": (
+        r"\b(?:psma|pylarify|dcfpyl|piflufolastat|ga[\s-]?68|gallium|illuccix|"
+        r"axumin|fluciclovine|choline|pet(?:/ct|-ct)?|bone\s+scan)\b"
+    ),
+    "course_crpc": (
+        r"\b(?:n?m?crpc|castrat(?:e|ion)[\s-]+(?:resistant|refractory)|"
+        r"hormone[\s-]+refractory)\b"
+    ),
+}
+
+
 def combined_text_pattern(trigger_regex):
     """Build one case-insensitive parquet candidate regex from labeled patterns."""
     return "(?i)(?:" + "|".join(trigger_regex.values()) + ")"

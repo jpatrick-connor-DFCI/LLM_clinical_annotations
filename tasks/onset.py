@@ -55,3 +55,29 @@ def earliest(findings):
         if prefer_onset(finding, best):
             best = finding
     return best
+
+
+def both_hold(rows):
+    """The first date at which every component finding held, or None.
+
+    The date is the latest component date. Its precision is the coarsest among
+    components not certainly earlier than that date, since any of them could
+    still be the one that completes the combination.
+    """
+    if not rows or any(r is None or not r.get("event_date") for r in rows):
+        return None
+    latest = max(rows, key=lambda r: (r["event_date"], r.get("source_note_date") or ""))
+    start = date.fromisoformat(latest["event_date"])
+    open_rows = [
+        r for r in rows
+        if date_interval(r["event_date"], r.get("date_precision"))[1] >= start
+    ]
+    precision = min(
+        (r.get("date_precision") or "unknown" for r in open_rows),
+        key=lambda p: PRECISION_RANK.get(p, 0),
+    )
+    return {
+        "event_date": latest["event_date"],
+        "date_precision": precision,
+        "source_note_date": max((r.get("source_note_date") or "") for r in rows) or None,
+    }

@@ -93,10 +93,14 @@ LABEL_SCHEMA = {
     "metastatic_quote": pl.Utf8,
     "metastatic_date": pl.Utf8,
     "metastatic_source": pl.Utf8,
+    "metastatic_date_precision": pl.Utf8,
+    "metastatic_date_source": pl.Utf8,
     "is_castration_resistant": pl.Boolean,
     "crpc_quote": pl.Utf8,
     "crpc_date": pl.Utf8,
     "crpc_source": pl.Utf8,
+    "crpc_date_precision": pl.Utf8,
+    "crpc_date_source": pl.Utf8,
     "is_mcrpc": pl.Boolean,
 }
 for _name in CRITERIA:

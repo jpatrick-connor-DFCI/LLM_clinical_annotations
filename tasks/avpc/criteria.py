@@ -42,7 +42,7 @@ from tasks.nepc.ne_gate import positive_ihc_markers, screen_asserted, screen_ne_
 from tasks.onset import date_interval, earliest
 from tasks.trial_guard import trial_boilerplate_reason
 
-CRITERIA_VERSION = "avpc-criteria-v2"
+CRITERIA_VERSION = "avpc-criteria-v3"
 
 CRITERIA = ("C1", "C2", "C3", "C4", "C5", "C6", "C7")
 BULKY_CM = 5.0
@@ -676,10 +676,14 @@ def evaluate_patient(rows):
         "metastatic_quote": metastatic and metastatic["quote"],
         "metastatic_date": metastatic and metastatic.get("event_date"),
         "metastatic_source": metastatic_source,
+        "metastatic_date_precision": metastatic and metastatic.get("date_precision"),
+        "metastatic_date_source": metastatic and metastatic.get("date_source"),
         "is_castration_resistant": crpc is not None,
         "crpc_quote": crpc and crpc["quote"],
         "crpc_date": crpc and crpc.get("event_date"),
         "crpc_source": crpc_source,
+        "crpc_date_precision": crpc and crpc.get("date_precision"),
+        "crpc_date_source": crpc and crpc.get("date_source"),
         "is_mcrpc": metastatic is not None and crpc is not None,
     }
     for name in CRITERIA:

@@ -136,6 +136,7 @@ class TaskSpec:
     correction_hint: str = ""
     default_output_dir: Path = None
     collector_hint: str = ""
+    max_findings_per_note: int = MAX_FINDINGS_PER_NOTE
 
     @property
     def findings_schema(self):
@@ -231,6 +232,10 @@ def run_fingerprint(spec, evidence_sha256, provider_name, model):
         str(QUOTE_HARD_MAX_CHARS),
     ):
         hasher.update(str(value).encode("utf-8"))
+        hasher.update(b"\x1f")
+    # Hashed only when changed, so fingerprints of tasks on the default stay valid.
+    if spec.max_findings_per_note != MAX_FINDINGS_PER_NOTE:
+        hasher.update(f"max_findings_per_note={spec.max_findings_per_note}".encode("utf-8"))
         hasher.update(b"\x1f")
     return hasher.hexdigest()[:20]
 
@@ -429,7 +434,7 @@ def extract_note(spec, provider, client, model, max_retries, note,
 
     rows, rejected = [], []
     for index, finding in enumerate(findings):
-        if index >= MAX_FINDINGS_PER_NOTE:
+        if index >= spec.max_findings_per_note:
             reason, fields = "too_many_findings", None
         else:
             fields, reason = ground_finding(spec, finding, note)
@@ -482,13 +487,17 @@ def _append(path, rows, schema):
     write_parquet_atomic(incoming, path)
 
 
+def _final_attempts(ledger):
+    return ledger.unique(subset=["DFCI_MRN", "note_uid"], keep="last", maintain_order=True)
+
+
 def compact_outputs(paths, spec):
     """Keep the last ledger row per note and only that attempt's findings."""
     ledger = _read(paths["processed"], LEDGER_SCHEMA)
     if ledger.is_empty():
         return ledger
     before = ledger.height
-    ledger = ledger.unique(subset=["DFCI_MRN", "note_uid"], keep="last", maintain_order=True)
+    ledger = _final_attempts(ledger)
     if ledger.height != before:
         write_parquet_atomic(ledger, paths["processed"])
         print(f"  Compacted {paths['processed'].name}: {before} -> {ledger.height} rows")
@@ -566,6 +575,39 @@ def write_labels(spec, paths, findings, status, run_config, notes=None):
          **{k: str(v) for k, v in spec.label_versions.items()}},
     )
     return labels
+
+
+def load_label_inputs(spec, output_dir, evidence_path=None):
+    """Read-only view of a finished extraction for builders outside the runner.
+
+    Validates the evidence like `run`, compacts the ledger and findings in
+    memory (nothing is rewritten), and attaches `_trial_context_reason`.
+    Returns a dict with `notes`, `findings`, `status`, `cohort` and `run_config`.
+    """
+    args = argparse.Namespace(output_dir=Path(output_dir), evidence_path=evidence_path)
+    paths = _paths(spec, args)
+    meta = validate_evidence(spec, paths["evidence"], paths["evidence_meta"])
+    _check_ledger_scan_config(paths["processed"], meta["scan_config"])
+    run_config = (read_metadata(paths["run"]) or {}).get("run_config")
+    if run_config is None:
+        raise ValueError(
+            f"No {spec.label} extraction run found in {output_dir}; run the extraction first."
+        )
+    notes = load_evidence_notes(paths["evidence"])
+    cohort = set(meta.get("cohort_mrns") or []) | {mrn for mrn, _ in notes}
+    ledger = _final_attempts(_read(paths["processed"], LEDGER_SCHEMA))
+    findings = _read(paths["findings"], spec.findings_schema).join(
+        ledger.select(["DFCI_MRN", "note_uid", "attempt_id"]),
+        on=["DFCI_MRN", "note_uid", "attempt_id"], how="semi",
+    )
+    return {
+        "notes": notes,
+        "findings": annotate_trial_context(findings, notes),
+        "status": patient_review_status(notes, ledger, cohort),
+        "cohort": sorted(int(m) for m in cohort),
+        "run_config": run_config,
+        "paths": paths,
+    }
 
 
 # --- Entry point ------------------------------------------------------------------

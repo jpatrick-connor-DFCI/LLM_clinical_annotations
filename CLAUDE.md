@@ -33,6 +33,15 @@ python preprocessing/cli/collect_avpc_notes.py --output-dir /path/to/out
 python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/out --provider vertex_ai
 python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/out --rebuild-labels-only  # re-gate, no LLM
 
+# Disease course (BCR / progression / mCRPC): one shared per-note extraction,
+# then three builders that make no LLM calls
+python preprocessing/cli/discover_structured_codes.py      # confirm LABS / MEDICATIONS codes on the cluster
+python preprocessing/cli/collect_course_notes.py --output-dir /path/to/out
+python tasks/disease_course/run_course_extraction.py --output-dir /path/to/out --provider vertex_ai
+python tasks/bcr/build_bcr_labels.py --output-dir /path/to/out
+python tasks/progression/build_progression_events.py --output-dir /path/to/out
+python tasks/mcrpc/build_mcrpc_labels.py --output-dir /path/to/out --met-source avpc   # or met_dx
+
 # The two longitudinal collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
 python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
@@ -203,6 +212,89 @@ that omitted that context; NEPC also fixes marker spellings and late addenda.
 exclusively visceral, C3 = lytic. This is the reverse of `binary_subtype` and
 `longitudinal_subtype`.
 
+AVPC labels also carry `metastatic_date_precision` / `_source` and
+`crpc_date_precision` / `_source` (criteria v3, additive; label-only rebuild).
+
+### Disease course (`tasks/disease_course`, `bcr`, `progression`, `mcrpc`)
+
+**Shared extraction.** `tasks/disease_course/run_course_extraction.py` is a
+per-note `TaskSpec` run over `course_evidence.parquet`, using the same runner
+as nepc/avpc. Its `max_findings_per_note` is 120; that field is hashed only
+when it differs from the default, so nepc/avpc fingerprints are unchanged.
+
+It extracts atomic findings:
+
+- PSA values (`=`, `<`, `>` or `undetectable`)
+- RP and RT
+- therapy start, current and stop
+- BCR, progression, CRPC and mCRPC statements
+- imaging recurrence
+
+It writes `course_labels.parquet`, which holds the RP and primary/salvage RT
+index dates.
+
+**Builders.** The three builders make no LLM calls. They read the findings
+through `note_extraction.load_label_inputs` and `disease_course/statement_gate.py`,
+and drop every trial-context row before any rule runs. They combine those
+findings with structured `preprocessing/structured.py` loaders: LABS PSA and
+testosterone, MEDICATIONS, and the vital-status registry. Their outputs:
+
+- `bcr_labels`
+- `progression_events` plus `progression_labels`
+- `mcrpc_labels`
+
+Each output has a `.meta.parquet` that records:
+
+- versions
+- the course run config
+- structured-source path/size/mtime
+- every rule default
+
+Re-running a builder after a gate or rule change needs no extraction rerun.
+
+**PSA rules** (`disease_course/psa.py`):
+
+- **Merge.** LABS wins for the same draw. A note value matching a LABS draw
+  within the prior 7 days at the note's precision is a restatement, never a
+  separate draw.
+- **AUA.** Requires observed clearance (<0.1, or undetectable), then ≥0.2
+  confirmed by a later separate draw.
+- **Phoenix.** The preceding nadir + 2.
+- **PCWG3.** 30-day pretreatment baseline, ≥25% and ≥2 rise, onset ≥12 weeks,
+  confirmation ≥3 weeks later in the same therapy episode.
+
+**Therapy coverage** (`disease_course/therapy.py`) is tiered
+supported / reported / estimated:
+
+- **Supported:** repeated doses (median gap), a parseable formulation, or
+  days_supply.
+- **Reported:** current/stop statements.
+- **Estimated:** a lone record of unknown formulation. Estimated coverage
+  alone never establishes castration.
+
+**mCRPC** (`tasks/mcrpc/criteria.py`) is the earlier of:
+
+- the date both metastatic disease and CRPC hold. Metastatic disease comes
+  from `--met-source avpc|met_dx`, and the upstream label's sha256 and
+  metadata are recorded.
+- a dated mCRPC statement.
+
+Derived CRPC requires one of:
+
+- measured castration: testosterone <50 within ±60 days
+- assumed castration: supported/reported ADT at both the rise and the
+  confirmation
+
+Testosterone ≥50 vetoes derived CRPC. A cabazitaxel / radium-223 / sipuleucel-T
+start is a separate `drug_proxy` basis. It fills a missing date, or caps an
+earlier one with `proxy_precedes_primary=True`. Lu-177-PSMA is audit-only.
+
+Progression events have these properties:
+
+- They carry the therapy exposure on their date.
+- For failed or not-run patients they hold only the registry death.
+- `events.first_event_after` picks a PFS event downstream.
+
 All repository-owned persisted I/O uses Zstandard-compressed Parquet, including
 evidence, snippet bundles, run/scan metadata, processed ledgers, rejected or
 failed rows, raw findings, and final timelines/labels. JSON is restricted to
@@ -256,7 +348,8 @@ PROFILE_DATA parquet basenames. This drives both cleaning rules
 `notebooks/<task>.ipynb` is the primary way to run a task end to end: set the
 `PROVIDER` toggle, flip on the `RUN_*` cells you need, run top to bottom. Each
 notebook subprocess-calls the relevant `preprocessing/cli/` script(s) and then
-the task's runner with `--provider PROVIDER`. The exception is
+the task's runner with `--provider PROVIDER`. `disease_course.ipynb` additionally runs the three
+builders (`RUN_BUILDERS`). The exception is
 `primary_subtype.ipynb`, which makes no LLM calls. It full-joins
 `nepc_labels` and `avpc_labels` and adds a single `primary_label` column
 (NEPC > AVPC > conventional). That column is null whenever a higher-precedence

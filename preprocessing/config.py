@@ -116,6 +116,7 @@ LONGITUDINAL_SUBTYPE_EVIDENCE_SCHEMA_VERSION = "avpc-nepc-evidence-parquet-v3"
 NEPC_DX_EVIDENCE_SCHEMA_VERSION = "nepc-dx-note-evidence-parquet-v2"
 AVPC_EVIDENCE_SCHEMA_VERSION = "avpc-note-evidence-parquet-v2"
 MET_DX_EVIDENCE_SCHEMA_VERSION = "met-dx-evidence-parquet-v1"
+COURSE_EVIDENCE_SCHEMA_VERSION = "course-note-evidence-parquet-v1"
 
 
 @dataclass(frozen=True)

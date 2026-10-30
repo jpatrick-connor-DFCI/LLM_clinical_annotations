@@ -31,7 +31,15 @@ tasks/              One directory per extraction task, each with a system
   nepc/                  Per-note NEPC vs non-NEPC diagnosis, quote, and date.
   avpc/                  Per-note AVPC: metastatic, CRPC, and C1-C7 (paper
                          numbering), each with its own quote and date.
-  note_extraction.py     Shared one-call-per-note runner used by nepc/ and avpc/.
+  disease_course/        Per-note prostate course extraction (PSA, local and
+                         systemic therapy, recurrence/progression/CRPC
+                         statements) plus shared PSA and therapy rules.
+  bcr/                   BCR date and basis (AUA, Phoenix, statement, imaging).
+  progression/           Dated progression events (PSA/PCWG3, radiographic,
+                         clinical, death) for PFS.
+  mcrpc/                 mCRPC diagnosis date.
+  note_extraction.py     Shared one-call-per-note runner used by nepc/, avpc/
+                         and disease_course/.
 
 notebooks/          One notebook per task with a PROVIDER toggle. Each notebook
                     subprocess-calls the preprocessing CLIs, then the task's
@@ -198,6 +206,51 @@ evidence v2 retain trial section context; NEPC also adds supported marker
 spellings and preserves late pathology addenda. Existing v1 evidence must be
 recollected with `--overwrite` and then extracted again to include context,
 notes, and passages omitted by the old collectors.
+
+### Disease course: BCR, progression events, mCRPC date
+
+One per-note extraction (`tasks/disease_course`, same runner as NEPC/AVPC)
+records PSA values, RP/RT, therapy starts/stops, and recurrence, progression,
+CRPC and mCRPC statements, each with its quote and date. Three builders then
+combine those findings with structured LABS PSA and testosterone, MEDICATIONS,
+and the vital-status registry. They make no LLM calls, so a rule change needs
+only a builder rerun.
+
+```bash
+python preprocessing/cli/discover_structured_codes.py   # check LABS / medication codes first
+python preprocessing/cli/collect_course_notes.py --output-dir /path/to/course
+python tasks/disease_course/run_course_extraction.py --output-dir /path/to/course --provider vertex_ai
+python tasks/bcr/build_bcr_labels.py --output-dir /path/to/course
+python tasks/progression/build_progression_events.py --output-dir /path/to/course
+python tasks/mcrpc/build_mcrpc_labels.py --output-dir /path/to/course   # needs avpc_labels (or --met-source met_dx)
+```
+
+- **`bcr_labels.parquet`**: `bcr_date` and `bcr_basis`. The bases are:
+  - `psa_aua`: after RP. Clearance (<0.1, or undetectable) must be observed
+    first, then ≥0.2 is confirmed by a later draw.
+  - `psa_phoenix`: after primary RT, at the nadir + 2.
+  - `statement`: a clinician's statement.
+  - `imaging`: imaging recurrence.
+
+  The file also has `persistent_psa`, the clearance date and per-basis audit
+  columns. Persistent PSA is flagged but is not itself BCR.
+- **`progression_events.parquet`**: one row per dated PSA (statement or
+  PCWG3), radiographic, clinical or death event, with the therapy exposure on
+  that date and how certain it is. `progression_labels.parquet` gives the first
+  event of each type, plus the registry death and last-alive dates.
+- **`mcrpc_labels.parquet`**: `mcrpc_date`, the earlier of:
+  - the date metastatic disease (from the AVPC labels by default) and CRPC
+    both hold
+  - a dated mCRPC statement
+
+  Derived CRPC requires measured castration (testosterone <50 near the rise) or
+  documented ADT at both the rise and its confirmation. A start of
+  cabazitaxel, radium-223 or sipuleucel-T is a separate `drug_proxy` basis. It
+  fills a missing date, and caps an earlier one with
+  `proxy_precedes_primary=True`. Lu-177-PSMA alone never counts.
+
+Every output has a `.meta.parquet` with its rule versions, defaults and
+structured-source identities. `notebooks/disease_course.ipynb` runs all of it.
 
 ## Setup
 

@@ -142,6 +142,22 @@ def test_rebuild_labels_only_makes_no_calls(out_dir, monkeypatch):
         runner.run(_runner_args(out_dir, rebuild_labels_only=True, overwrite=True))
 
 
+def test_date_provenance_columns_survive_rebuild(out_dir, monkeypatch):
+    provider = FakeProvider()
+    monkeypatch.setattr(runner, "get_provider", lambda name: provider)
+    runner.run(_runner_args(out_dir))
+    monkeypatch.setattr(runner, "get_provider", lambda name: pytest.fail("no calls expected"))
+    runner.run(_runner_args(out_dir, rebuild_labels_only=True))
+
+    stored = pl.read_parquet(out_dir / "avpc_labels.parquet")
+    columns = ["metastatic_date_precision", "metastatic_date_source",
+               "crpc_date_precision", "crpc_date_source"]
+    assert all(stored.schema[c] == pl.Utf8 for c in columns)
+    row = stored.filter(pl.col("DFCI_MRN") == 101).row(0, named=True)
+    # Both states are dated by their notes (no stated date in either quote).
+    assert [row[c] for c in columns] == ["day", "note_date", "day", "note_date"]
+
+
 def test_validate_finding_coerces_types():
     fields, reason = runner.validate_finding(
         {"item": "Bone_Metastasis", "count": "24", "lytic_predominant": "true"}, {}

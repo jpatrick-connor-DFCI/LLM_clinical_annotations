@@ -9,22 +9,12 @@ from the repo root.
 # Install (core + one provider's SDK)
 pip install -e ".[dfci_gpt]"     # or ".[vertex_ai]"
 
-# Build the shared note source (required before most pipelines)
-python preprocessing/cli/compile_patient_snippets.py
-
-# Binary subtype: compile snippets, then classify
-python preprocessing/cli/compile_patient_snippets.py --output-path /path/to/patient_snippets.parquet
-python tasks/binary_subtype/run_NEPC_classifier.py --snippets-path /path/to/patient_snippets.parquet --output-dir /path/to/out --provider dfci_gpt
-
-# Cancer stage / Gleason / longitudinal subtype: collect evidence, then extract
+# Cancer stage / Gleason: collect evidence, then extract
 python preprocessing/cli/extract_stage_notes.py --output-dir /path/to/out          # stage: scan (no LLM)
 python tasks/cancer_stage/run_stage_extraction.py --output-dir /path/to/out --provider vertex_ai
 
 python preprocessing/cli/collect_gleason_notes.py --output-dir /path/to/out
 python tasks/gleason_score/build_gleason_timeline.py --output-dir /path/to/out --provider dfci_gpt
-
-python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out
-python tasks/longitudinal_subtype/build_nepc_timeline.py --output-dir /path/to/out --provider dfci_gpt
 
 # Per-note NEPC / AVPC: collect trigger notes, then one LLM call per note
 python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out
@@ -32,6 +22,10 @@ python tasks/nepc/run_nepc_extraction.py --output-dir /path/to/out --provider ve
 python preprocessing/cli/collect_avpc_notes.py --output-dir /path/to/out
 python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/out --provider vertex_ai
 python tasks/avpc/run_avpc_extraction.py --output-dir /path/to/out --rebuild-labels-only  # re-gate, no LLM
+python preprocessing/cli/collect_avpc_adjacent_notes.py --output-dir /path/to/out
+python tasks/avpc_adjacent/run_avpc_adjacent_extraction.py --output-dir /path/to/out --provider vertex_ai
+python preprocessing/cli/collect_arlpc_notes.py --output-dir /path/to/out    # Pathology + Clinician only
+python tasks/arlpc/run_arlpc_extraction.py --output-dir /path/to/out --provider vertex_ai
 
 # Disease course (BCR / progression / mCRPC): one shared per-note extraction,
 # then three builders that make no LLM calls
@@ -42,10 +36,10 @@ python tasks/bcr/build_bcr_labels.py --output-dir /path/to/out
 python tasks/progression/build_progression_events.py --output-dir /path/to/out
 python tasks/mcrpc/build_mcrpc_labels.py --output-dir /path/to/out --met-source avpc   # or met_dx
 
-# The two longitudinal collectors cache their evidence: re-running with the same
+# Collectors cache their evidence: re-running with the same
 # scan settings reuses it, changed settings raise until you pass --overwrite.
-python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --scan-workers 16
-python preprocessing/cli/collect_nepc_notes.py --output-dir /path/to/out --context-chars 4000 --overwrite
+python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out --scan-workers 16
+python preprocessing/cli/collect_nepc_dx_notes.py --output-dir /path/to/out --context-chars 4000 --overwrite
 
 # Pilot / subset run (most task runners support these)
 python tasks/cancer_stage/run_stage_extraction.py --mrns "12345,67890" --provider dfci_gpt
@@ -106,7 +100,7 @@ Every task is split into a **preprocessing** step and a **task runner**:
 1. **Preprocessing** (`preprocessing/cli/`) — provider-independent. Regex
    trigger matching across notes, context-window extraction, writes an
    Parquet evidence/snippet artifact. `compile_patient_snippets.py`
-   and `collect_gleason_notes.py`/`collect_nepc_notes.py` use
+   and `collect_gleason_notes.py`/`collect_nepc_dx_notes.py` use
    `ProcessPoolExecutor` for the per-note scan (`--scan-workers`, default
    `os.cpu_count()`); dedup and chunk packing stay single-process because dedup
    must see the whole cohort. `extract_stage_notes.py` lazily prefilters the
@@ -117,47 +111,22 @@ Every task is split into a **preprocessing** step and a **task runner**:
    settings reuses the existing evidence and skips the scan; changed settings
    raise rather than silently mixing incompatible evidence, so `--overwrite` is
    required to rescan.
-2. **Task runner** (`tasks/<task>/`) — reads the evidence artifact, groups
-   snippets into per-patient chunks (greedy packing up to `payload_max_chars`),
-   calls the selected provider once per chunk via `ThreadPoolExecutor`, writes
-   raw findings + a processed-patient log incrementally. `run_NEPC_classifier.py`
-   resumes at **patient** granularity and supports `--retry-failures` to retry
-   only prior failures. Staging and binary subtype also persist a run fingerprint;
-   changed evidence, model, prompt, payload sizing, or output schema requires
-   `--overwrite` instead of silently mixing output generations.
+2. **Task runner** (`tasks/<task>/`) — reads the evidence artifact and calls
+   the selected provider. Stage and Gleason pack per-patient evidence into
+   bounded chunks; the per-note tasks use the shared `tasks/note_extraction.py`
+   runner. Evidence, model, prompt, payload sizing, and output schema are
+   fingerprinted to prevent incompatible resume.
 
-   The two longitudinal timeline builders resume at **chunk** granularity via
-   `avpc_nepc_processed_chunks.parquet` / `gleason_processed_chunks.parquet`, but
-   they differ in how far a gap propagates. `gleason_score` resumes strictly per
-   chunk: a patient whose chunk 2 failed re-runs only chunk 2, keeping the
-   findings the other chunks already produced. `longitudinal_subtype` instead
-   compiles a patient history forward across its map calls — each chunk sees a
-   deterministic digest of prior chunks' validated findings plus a short
-   LLM-written narrative (`tasks/longitudinal_subtype/history.py`), so grounding
-   still only accepts quotes from that chunk's own notes. Because that history
-   depends on a consistent forward pass, its resume re-runs from the **first**
-   outstanding chunk of a patient onward, not just the gap: a patient whose
-   chunk 2 failed re-runs chunks 2 and every later chunk. Both runners derive
-   per-patient status as `ok` / `partial:N/M` / `failed:<err>`, and both record
-   the evidence `scan_config` hash on each chunk row; a mismatch against the
-   evidence sidecar raises instead of resuming onto chunks that no longer mean
-   the same thing. `longitudinal_subtype`'s run fingerprint also includes
-   `HISTORY_VERSION`, so changing how carried history is built or presented
-   forces `--overwrite` rather than mixing chunks produced under two different
-   history contracts.
+   Gleason resumes per chunk through `gleason_processed_chunks.parquet`: only
+   failed/missing chunks are rerun. The evidence `scan_config` is checked before
+   reuse. Per-note tasks resume through their processed-note ledgers and support
+   `--retry-failures`.
 
-   Both subtype pipelines call AVPC only for castration-resistant, metastatic
-   prostate cancer meeting at least one of C1–C7. The two disease states are
-   extracted as findings of their own, and every grounded quote offered for one
-   must pass the deterministic gate in `tasks/longitudinal_subtype/mcrpc_gate.py`,
-   which the model cannot override. C2, C3 and C5 imply metastatic disease and
-   C7 implies castration resistance; C1 is exempt from castration resistance
-   but must still be metastatic. The metastatic screen defers to
-   `tasks/longitudinal_subtype/met_veto.py`, which separates M1 from N1:
-   regional pelvic nodal disease alone does not qualify even though pathology
-   writes it as "metastatic adenocarcinoma in 2 of 14 pelvic lymph nodes". Both
-   run fingerprints hash `GATE_VERSION` and the met veto's `VETO_VERSION`, so
-   changing either gate requires `--overwrite`.
+   Active AVPC and disease-course builders share the deterministic disease-state
+   gates in `tasks/mcrpc_gate.py` and `tasks/met_veto.py`. The metastatic gate
+   separates M1 from N1; regional pelvic nodal disease alone does not qualify.
+   Per-note label metadata records gate versions, and a label-only rebuild
+   reapplies changed gates without new LLM calls.
 
 Patient chunking is lossless: patients with many notes get multiple LLM calls
 rather than truncation, so rare findings are never silently dropped.
@@ -195,7 +164,7 @@ that omitted that context; NEPC also fixes marker spellings and late addenda.
   "negative for" cue binds only forward.
 - `tasks/avpc/criteria.py` applies Aparicio thresholds, pairings, and C7
   interval rules. Every number is re-checked against its quote.
-- Both reuse `mcrpc_gate` and `met_veto` from `longitudinal_subtype`.
+- The disease-state gates live in shared `tasks/mcrpc_gate.py` and `tasks/met_veto.py`.
 - `tasks/trial_guard.py` rejects trial/eligibility text for every finding.
   At label-build time, the runner also locates quotes in their source evidence
   to detect cropped text from eligibility sections; a separate clinical
@@ -208,12 +177,141 @@ that omitted that context; NEPC also fixes marker spellings and late addenda.
   the extraction fingerprint. So `--rebuild-labels-only` re-applies them
   without LLM calls. The metadata also records `trial_guard_version`.
 
+**NEPC pathology groups.** `tasks/nepc/tiers.py` derives four groups:
+
+- **t1:** definitive small-cell, large-cell NE or high-grade NE carcinoma,
+  including mixed tumors with a confirmed NE carcinoma component. IHC alone
+  and transformation without a definitive carcinoma target do not qualify.
+- **t2:** explicitly poorly differentiated/dedifferentiated carcinoma plus NE
+  features or positive NE tissue IHC. Gleason grade alone does not qualify.
+- **t3:** explicit prostate adenocarcinoma plus NE features or positive NE IHC.
+  Gleason 4+5=9 with focal weak synaptophysin staining is t3, not t1/t2.
+- **t4:** documented prostate adenocarcinoma, completed review, and no gated NE
+  evidence in the patient's extracted history. Cohort membership supplies
+  clinical eligibility. Clinical aggressiveness alone does not exclude t4.
+
+Pathology reports and explicit pathology summaries in clinician notes count;
+bare assessments and IHC without histology do not establish a group. Pairing
+is within one note, rejects explicitly different specimen sites, and uses
+`onset.both_hold` for dates. `nepc_t*_supporting_quotes` retains both source
+passages for a combined finding. `nepc_tier` selects t1 > t2 > t3 > t4;
+`unclassified` means reviewed but insufficient evidence. Partial/failed/unrun
+review cannot establish a reference negative; unsupported flags remain null.
+
+`nepc_status` retains its legacy broad NE-evidence meaning and
+`has_stated_nepc_dx` still accepts clinical assertions. Neither is the
+pathology-defined definitive group. `primary_label` continues to use broad
+`nepc_status` for compatibility; `primary_label_definitive` keys on `nepc_t1`.
+
+Evidence v3 adds adenocarcinoma/histology triggers; prompt v4 adds
+`prostate_adenocarcinoma` and requests pathology context. Migration requires
+collector and extraction `--overwrite` (collector overwrite discards prior
+outputs), not just a label rebuild. Tier v2 and NE gate v5 are recorded in
+label metadata. NE gate v5 also accepts explicitly asserted focal/weak NE
+staining; AVPC C6 shares this tissue-marker interpretation.
+
+NE gate v6 (label-only rebuild) closes hedge leaks found in review. Before the
+term it adds "possibility", "question of", "look for", "hypothesis" and
+"doubtful". After the term it adds bare "(less/more/most) likely",
+"unlikely" and "doubtful". A "?" attached to the term ("?NEPC", "NEPC?",
+"NE features? Awaiting stains") also hedges it. The post-term "likely" also
+applies to `screen_asserted` callers in AVPC and adjacent. `screen_any_asserted`
+passes when any one occurrence is asserted; the visceral malignancy-word check
+uses it.
+
+**Review policy v2** (`note_extraction.review_incomplete`, label-only rebuild).
+A `partial:K/N` review is treated like failed/not_run in all four per-note
+tasks (NEPC, AVPC, AVPC-adjacent, ARLPC): positives stand, negatives stay
+null. `review_policy_version` is recorded in each `labels.meta`. The disease
+course builders keep their own `UNLABELED_STATUSES`.
+
 **C2/C3 numbering.** `tasks/avpc` uses the paper's C2/C3 numbering: C2 =
-exclusively visceral, C3 = lytic. This is the reverse of `binary_subtype` and
-`longitudinal_subtype`.
+exclusively visceral, C3 = lytic.
 
 AVPC labels also carry `metastatic_date_precision` / `_source` and
 `crpc_date_precision` / `_source` (criteria v3, additive; label-only rebuild).
+
+Criteria v4 (label-only rebuild) tightens four criteria after manual review:
+
+- **C3:** one lytic lesion is not predominance. The patient's other bone
+  descriptions within 180 days veto it: any blastic, sclerotic or mixed wording
+  vetoes plural-lytic wording, and "predominantly / diffusely sclerotic" vetoes
+  even "predominantly lytic".
+- **C4:** the measurement must belong to the node or the prostate/pelvic mass,
+  so "CT abdomen/pelvis: 6 cm liver mass" does not count.
+- **C5:** the PSA and the bone burden must be dated certainly within 90 days.
+  - A pre-ADT PSA cannot follow the first ADT start. A note-dated diagnostic
+    PSA retold in a later note is undated.
+  - A castrate-setting PSA cannot precede the first ADT start.
+  - ≥20 needs a written lesion count or innumerable / TNTC / superscan.
+  - `c5_psa_date`, `c5_bone_date`, `c5_psa_context` and `c5_gap_days` are
+    audit columns.
+- **C7:** the anchor is the earliest first-line ADT start. Its date must be
+  stated to month precision, and no CRPC may be documented before it. An
+  ARPI-only start or "progressed within N months of enzalutamide" never
+  anchors.
+
+Criteria v5 (label-only rebuild):
+
+- **Visceral:** at least one malignancy word (metastatic / mets / malignant /
+  carcinoma) must itself be asserted. "consistent with" / "c/w" are no longer
+  malignancy words, so "adrenal nodule consistent with adenoma" and "not
+  consistent with metastases" fail. This also keeps such rows out of
+  `is_metastatic`. Adjacent criteria v4 applies the same rule to A1.
+- **Gleason:** a total needs Gleason/GS context or an `a+b` sum. A bare `= 8`
+  ("PSA = 8") no longer matches.
+
+**AR-low / AR-indifferent (`tasks/arlpc`).** A third per-note `TaskSpec` run on
+the same runner. The collector scans Pathology (whole reports) and Clinician
+notes only; Imaging is skipped because PSMA-PET never counts. Labels are
+binary, `arlpc_`-prefixed, and independent of NE status and disease state, in
+two tiers:
+
+- **strict:** AR-low tissue IHC (negative, or any reduced wording such as weak,
+  focal, patchy or reduced vs prior), AR-specific statements
+  (AR-null/low/indifferent, double-negative), and somatic genomic AR loss.
+- **broad:** strict plus androgen-independent / hormone-refractory wording.
+
+Each tier records its `onset.earliest` date, and `arlpc_tissue_date` records
+the earliest AR-low IHC date. AR-target IHC loss (PSA/PSAP/NKX3.1/PSMA/HOXB13)
+is corroborating columns only, and AR-positive IHC is an audit count only.
+
+`tasks/arlpc/ar_gate.py` has these rules:
+
+- Wording decides moderate/strong versus reduced; percent and H-score are
+  stored only.
+- A quote or model that favors a non-prostate origin vetoes the finding.
+- AR-V7, amplification, mutation and germline results are rejected.
+- It shares `tasks/ihc_polarity.py` with `ne_gate`, but an equidistant
+  positive/negative cue tie is unresolved for AR, not negative.
+
+The gate's version goes in `labels.meta` as `ar_gate_version`. The
+`primary_subtype` notebook left-joins these columns as annotation only, and
+`primary_label` precedence is unchanged.
+
+**AVPC-adjacent (`tasks/avpc_adjacent`).** A fourth per-note `TaskSpec`, fully
+separate from `tasks/avpc` (own collector, prompt, ledger and labels; it never
+reads `avpc_labels`). Its prompt is a deliberate copy of the AVPC prompt, not an
+import, so the AVPC fingerprint is unchanged. It adds three things: an extended
+`visceral_metastasis`, a `lytic_component` field on `bone_metastasis`, and an
+`aggressive_variant_statement` item. There is no disease-state gate. A patient
+is `is_avpc_adjacent` if any of these hold:
+
+- **A1:** any visceral or soft-tissue metastasis. Lymph nodes, bone-lesion
+  soft-tissue/epidural extension (`bone_extension_not_visceral`) and T4 bladder
+  or rectal invasion (`local_invasion_not_metastasis`) are vetoed.
+- **A2:** any lytic component, including mixed lytic/blastic.
+- **A3:** modified C5. It reuses `avpc.criteria.evaluate_c5` through its
+  `is_high_volume=` hook, with extent wording such as extensive, diffuse or
+  multiple.
+- **A4:** an asserted AVPC / anaplastic / variant-CRPC statement. Anaplastic
+  tumors of other primaries are rejected.
+- **C1–C7:** any strict criterion, from `avpc.criteria.evaluate_patient` with
+  its mCRPC gate ignored.
+
+Label columns are `avpc_adj_`-prefixed except `is_avpc_adjacent` and
+`avpc_adjacent_date`. `labels.meta` records `adjacent_criteria_version` plus the
+AVPC criteria and gate versions.
 
 ### Disease course (`tasks/disease_course`, `bcr`, `progression`, `mcrpc`)
 
@@ -309,9 +407,9 @@ remains pan-cancer unless an MRN restriction is supplied.
 `preprocessing/config.py` defines `SnippetProfile(context_chars, max_chars,
 payload_max_chars)` and `SNIPPET_PROFILES`:
 
-- `"binary_subtype"` — one LLM call per patient; tight per-trigger context, no
-  real per-note cap, one big per-patient payload budget (300k chars).
-- `"longitudinal"` — used by cancer_stage, gleason_score, longitudinal_subtype;
+- `"patient_snippets"` — reusable patient snippet bundles with tight context
+  and a 300k-character per-patient budget; optional preprocessing for review.
+- `"longitudinal"` — used by cancer_stage, gleason_score, and per-note collectors;
   wider per-trigger context (needed to date events), a real per-note cap, and
   a smaller per-chunk payload budget (60k chars) so patients with many notes
   get multiple LLM calls instead of one truncated call.
@@ -323,7 +421,6 @@ payload_max_chars)` and `SNIPPET_PROFILES`:
 | `LLM_ANNOTATIONS_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/LLM_annotations/` |
 | `PROFILE_DATA_PATH` | `/data/gusev/USERS/jpconnor/data/PROFILE_DATA/` |
 | `COMPASS_PATH` | `/data/gusev/USERS/jpconnor/data/CAIA/COMPASS/` |
-| `BINARY_NEPC_OUTPUT_DIR` | `<data_path>/LLM_NEPC_labels/` |
 | `STAGE_OUTPUT_DIR` | `/data/gusev/USERS/jpconnor/data/LLM_stage_extraction/` |
 | `CAIA_AZURE_OPENAI_ENDPOINT` / `_API_VERSION` / `_MODEL` | DFCI Azure OpenAI endpoint / `2024-04-01-preview` / `gpt-4o` |
 | `VERTEX_PROJECT` / `VERTEX_LOCATION` / `VERTEX_MODEL` | `gusevlabllm` / `us` (multi-region; Gemini 3+ isn't served in single US regions) / `gemini-3.5-flash-lite` |
@@ -350,7 +447,18 @@ PROFILE_DATA parquet basenames. This drives both cleaning rules
 notebook subprocess-calls the relevant `preprocessing/cli/` script(s) and then
 the task's runner with `--provider PROVIDER`. `disease_course.ipynb` additionally runs the three
 builders (`RUN_BUILDERS`). The exception is
-`primary_subtype.ipynb`, which makes no LLM calls. It full-joins
-`nepc_labels` and `avpc_labels` and adds a single `primary_label` column
-(NEPC > AVPC > conventional). That column is null whenever a higher-precedence
-label is unresolved.
+`primary_subtype.ipynb`, which makes no LLM calls. Its logic lives in
+`tasks/primary_subtype.py`. It full-joins `nepc_labels`, `avpc_labels` and
+`avpc_adjacent_labels` and adds three columns:
+
+- `primary_label` (`nepc` > `avpc` > `avpc_adjacent` > `prad`; `prad` was
+  formerly `conventional`), keyed on broad `nepc_status`.
+- `primary_label_definitive`, the same cascade keyed on `nepc_t1`.
+- `small_cell_discordant`, which flags AVPC/adjacent C1 small-cell findings
+  that NEPC did not label `nepc`. It is diagnostic only.
+
+Each label is null whenever a higher-precedence label is unresolved. Each
+input's `labels.meta` must match the current gate/criteria/review-policy
+versions, otherwise it raises with a `--rebuild-labels-only` hint.
+`primary_subtype_labels.meta.parquet` records each input's path, sha256 and
+label meta.

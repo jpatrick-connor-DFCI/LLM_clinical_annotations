@@ -8,6 +8,7 @@ from preprocessing.evidence import note_task_paths
 from preprocessing.longitudinal import file_sha256, write_scan_config_meta
 from preprocessing.parquet_io import read_metadata
 from tasks import note_extraction
+from tasks.arlpc import run_arlpc_extraction as arlpc
 from tasks.avpc import run_avpc_extraction as avpc
 from tasks.nepc import run_nepc_extraction as nepc
 from tasks.trial_guard import TRIAL_GUARD_VERSION, TrialContext, trial_boilerplate_reason
@@ -93,7 +94,7 @@ def test_source_context_uses_same_whitespace_and_punctuation_tolerance_as_ground
     assert TrialContext(text).reason('"Small-cell carcinoma of the prostate."') == "boilerplate:eligibility_section"
 
 
-@pytest.mark.parametrize("module", [nepc, avpc], ids=["nepc", "avpc"])
+@pytest.mark.parametrize("module", [nepc, avpc, arlpc], ids=["nepc", "avpc", "arlpc"])
 def test_pipeline_and_rebuild_use_source_context_without_losing_other_findings(tmp_path, module):
     spec = module.SPEC
     if module is nepc:
@@ -102,6 +103,9 @@ def test_pipeline_and_rebuild_use_source_context_without_losing_other_findings(t
             "quote": "Small cell carcinoma of the prostate.",
         }]
         label_column, negative, positive = "nepc_status", "non_nepc", "nepc"
+    elif module is arlpc:
+        model_findings = [{"evidence_type": "ar_statement", "quote": "AR-negative prostate cancer."}]
+        label_column, negative, positive = "arlpc_strict", False, True
     else:
         model_findings = [
             {"item": "metastatic_disease", "quote": "Metastatic prostate cancer to liver."},
@@ -140,12 +144,13 @@ def test_pipeline_and_rebuild_use_source_context_without_losing_other_findings(t
         provider="dfci_gpt", model=None, max_workers=1, max_retries=1, limit_notes=None,
         overwrite=False, retry_failures=False, rebuild_labels_only=False,
     )
+    rejections = "arlpc_gate_rejections" if module is arlpc else "gate_rejections"
     labels = note_extraction.run(spec, args, lambda _: Provider())
     by_mrn = {r["DFCI_MRN"]: r for r in labels.iter_rows(named=True)}
     assert by_mrn[1][label_column] == negative
     assert by_mrn[2][label_column] == positive
-    assert all("boilerplate:eligibility_section" in r for r in by_mrn[1]["gate_rejections"])
-    assert by_mrn[2]["gate_rejections"] == []
+    assert all("boilerplate:eligibility_section" in r for r in by_mrn[1][rejections])
+    assert by_mrn[2][rejections] == []
 
     findings = pl.read_parquet(paths["findings"])
     assert findings.height == 2 * len(model_findings)

@@ -16,7 +16,7 @@ from preprocessing.cli.extract_stage_notes import (
     _load_and_scan_sequential,
 )
 from preprocessing.triggers import combined_text_pattern
-from preprocessing.cli.collect_nepc_notes import TRIGGER_REGEX as NEPC_TRIGGER_REGEX
+from preprocessing.triggers import AVPC_TRIGGER_REGEX
 from preprocessing.triggers import find_trigger_matches
 from tasks.cancer_stage.run_stage_extraction import _normalize_stage_group
 
@@ -192,9 +192,9 @@ def test_pan_cancer_stage_candidates_include_numeric_substage_and_tnm(tmp_path):
     assert _normalize_stage_group("pT3N1M0") is None
 
 
-def test_longitudinal_subtype_candidates_include_composite_atomic_facts():
-    assert find_trigger_matches("Gleason 4+4=8", NEPC_TRIGGER_REGEX)
+def test_avpc_candidates_include_composite_atomic_facts():
+    assert find_trigger_matches("Gleason 4+4=8", AVPC_TRIGGER_REGEX)
     assert find_trigger_matches(
         "There is no evidence of osseous metastatic disease.",
-        NEPC_TRIGGER_REGEX,
+        AVPC_TRIGGER_REGEX,
     )

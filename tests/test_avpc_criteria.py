@@ -25,6 +25,75 @@ MET = row("metastatic_disease", "Metastatic prostate cancer to bone.", "2020-01-
 CRPC = row("castration_resistance", "Now castration-resistant prostate cancer.", "2021-01-10")
 
 
+@pytest.mark.parametrize("quote,expected", [
+    ("There are 2 bone metastases and 25 liver metastases.", False),
+    ("25 liver metastases and 2 bone metastases.", False),
+    ("2 bone metastases. Liver: 25 metastases.", False),
+    ("2 bone metastases and 25 metastases in the liver.", False),
+    ("2 bone metastases and 25 nodal lesions.", False),
+    ("25 bone metastases and 2 liver metastases.", True),
+    ("Bone scan shows 25 metastatic lesions.", True),
+    ("25 metastases in the skeleton.", True),
+])
+def test_c5_counts_only_bone_lesions(quote, expected):
+    bone = row("bone_metastasis", quote, count=2 if not expected else 25)
+    psa = row("low_psa", "At initial presentation before ADT, PSA was 4 ng/mL.",
+              psa_ng_ml=4., psa_context="initial_presentation_pre_adt")
+    fields, _ = evaluate_patient([MET, CRPC, bone, psa])
+    assert fields["c5_met"] is expected
+    assert fields["is_avpc"] is expected
+
+
+@pytest.mark.parametrize("date,precision", [(None, "unknown"), ("2021-01-01", "year")])
+def test_c4_and_avpc_preserve_uncertain_prerequisite_dates(date, precision):
+    mass = row("bulky_prostate_pelvic_mass", "Prostate mass measuring 6 cm.",
+               "2021-06-01", size_cm=6.)
+    grade = row("gleason_high_grade", "Gleason 4+5=9.", date, precision, gleason_total=9)
+    fields, _ = evaluate_patient([MET, CRPC, mass, grade])
+    assert fields["is_avpc"] is True
+    assert fields["c4_met"] is True
+    assert fields["c4_date"] == ("2021-06-01" if date else None)
+    assert fields["avpc_date"] == fields["c4_date"]
+    assert fields["c4_date_precision"] == precision
+    assert fields["avpc_date_precision"] == precision
+
+
+def test_c6_undated_component_keeps_positive_label_with_unknown_onset():
+    marker = row("ne_marker", "Synaptophysin positive.", None, "unknown",
+                 specimen="tissue", marker="synaptophysin")
+    lab = row("elevated_ldh", "LDH 600 (ULN 250).", value=600., uln=250.)
+    fields, _ = evaluate_patient([MET, CRPC, marker, lab])
+    assert fields["is_avpc"] and fields["c6_met"]
+    assert fields["c6_date"] is None and fields["avpc_date"] is None
+    # A separate, fully dated criterion can still establish a known onset.
+    node = row("bulky_lymphadenopathy", "Pelvic lymph node measuring 6 cm.", size_cm=6.)
+    fields, _ = evaluate_patient([MET, CRPC, marker, lab, node])
+    assert fields["avpc_date"] == node["event_date"]
+
+
+@pytest.mark.parametrize("date,precision", [(None, "unknown"), ("2021-01-01", "year")])
+def test_composite_precision_survives_label_parquet(tmp_path, date, precision):
+    import polars as pl
+    from tasks import note_extraction
+    from tasks.avpc import run_avpc_extraction as runner
+    from tasks.avpc_adjacent import run_avpc_adjacent_extraction as adjacent
+
+    rows = [MET, CRPC,
+            row("bulky_prostate_pelvic_mass", "Prostate mass measuring 6 cm.",
+                "2021-06-01", size_cm=6.),
+            row("gleason_high_grade", "Gleason 4+5=9.", date, precision, gleason_total=9)]
+    for module, prefix, date_column in [(runner, "", "avpc_date"),
+                                        (adjacent, "avpc_adj_", "avpc_adjacent_date")]:
+        findings = note_extraction._frame(rows, module.SPEC.findings_schema)
+        labels = note_extraction._frame(module.build_labels(findings, {1: "ok"}), module.LABEL_SCHEMA)
+        path = tmp_path / f"{prefix}labels.parquet"
+        labels.write_parquet(path)
+        label = pl.read_parquet(path).row(0, named=True)
+        assert label[f"{prefix}c4_date_precision"] == precision
+        assert label[f"{date_column}_precision"] == precision
+        assert label[date_column] == ("2021-06-01" if date else None)
+
+
 def test_size_and_gleason_parsing():
     assert measurements_cm("node measures 5.4 x 3.2 cm") == [5.4, 3.2]
     assert measurements_cm("node measures 54 mm") == [pytest.approx(5.4)]
@@ -359,3 +428,173 @@ def test_no_findings_gives_all_false():
     assert not fields["is_avpc"] and fields["n_avpc_criteria"] == 0
     assert all(fields[f"c{n}_met"] is False for n in range(1, 8))
     assert rejections == []
+
+
+# --- Manual-review regressions (criteria v4) ----------------------------------------
+
+
+@pytest.mark.parametrize("quote", [
+    "Lytic metastasis in the L3 vertebral body.",
+    "New 1.2 cm lytic lesion in the right iliac bone, consistent with metastasis.",
+])
+def test_c3_single_lytic_lesion_is_not_predominance(quote):
+    lytic = row("bone_metastasis", quote, lytic_predominant=True)
+    fields, rejections = evaluate_patient([CRPC, lytic])
+    assert fields["c3_met"] is False
+    assert "bone_metastasis:c3_single_lytic_lesion" in rejections
+
+
+def test_c3_plural_lytic_contradicted_by_sclerotic_description_nearby():
+    lytic = row("bone_metastasis", "Multiple lytic osseous metastases.", "2021-03-01",
+                lytic_predominant=True)
+    assert evaluate_patient([CRPC, lytic])[0]["c3_met"] is True
+    sclerotic = row("bone_metastasis", "Diffuse sclerotic osseous metastases.", "2021-04-01",
+                    lytic_predominant=False)
+    fields, rejections = evaluate_patient([CRPC, lytic, sclerotic])
+    assert fields["c3_met"] is False
+    assert "bone_metastasis:c3_contradicted_by_blastic_description" in rejections
+    # A sclerotic description years apart does not speak to this time point.
+    old = {**sclerotic, "event_date": "2017-01-01", "source_note_date": "2017-01-01"}
+    assert evaluate_patient([CRPC, lytic, old])[0]["c3_met"] is True
+
+
+def test_c3_explicit_predominance_needs_explicit_blastic_predominance_to_contradict():
+    lytic = row("bone_metastasis", "Predominantly lytic osseous metastases.", "2021-03-01",
+                lytic_predominant=True)
+    mixed = row("bone_metastasis", "Mixed lytic and sclerotic bone lesions.", "2021-04-01",
+                lytic_predominant=False)
+    assert evaluate_patient([CRPC, lytic, mixed])[0]["c3_met"] is True
+    blastic = row("bone_metastasis", "Predominantly sclerotic bone metastases.", "2021-04-01",
+                  lytic_predominant=False)
+    assert evaluate_patient([CRPC, lytic, blastic])[0]["c3_met"] is False
+
+
+@pytest.mark.parametrize("item,quote", [
+    ("bulky_prostate_pelvic_mass", "CT abdomen and pelvis: 6.1 cm liver mass."),
+    ("bulky_prostate_pelvic_mass", "Enlarged prostate; hepatic lesion measuring 6.1 cm."),
+    ("bulky_lymphadenopathy", "Pelvic lymph nodes are stable; liver lesion measures 6.1 cm."),
+])
+def test_c4_measurement_must_belong_to_node_or_pelvic_mass(item, quote):
+    finding = row(item, quote, size_cm=6.1)
+    assert screen_finding(finding).startswith("c4_measurement_not_")
+    grade = row("gleason_high_grade", "Gleason 4+5=9.", gleason_total=9)
+    assert evaluate_patient([MET, CRPC, finding, grade])[0]["c4_met"] is False
+
+
+def test_c4_pelvic_mass_still_counts_when_liver_also_mentioned():
+    mass = row("bulky_prostate_pelvic_mass",
+               "Prostate mass measuring 6.1 cm; small liver lesions.", size_cm=6.1)
+    assert screen_finding(mass) is None
+
+
+def test_c5_retold_diagnostic_psa_does_not_pair_with_later_bone_scan():
+    # 2021 note restating the 2015 diagnostic PSA, with no stated date.
+    psa = row("low_psa", "At diagnosis PSA was 6.2 ng/mL.", "2021-05-01", source="note_date",
+              psa_ng_ml=6.2, psa_context="initial_presentation_pre_adt")
+    bone = row("bone_metastasis", "Bone scan: innumerable osseous metastases.", "2021-05-10")
+    fields, rejections = evaluate_patient([CRPC, psa, bone])
+    assert fields["c5_met"] is False
+    assert "low_psa:c5_presentation_psa_undated" in rejections
+
+
+def test_c5_year_precision_never_pairs_and_pre_adt_psa_must_precede_adt():
+    bone = row("bone_metastasis", "Bone scan: innumerable osseous metastases.", "2015-03-10")
+    year_psa = row("low_psa", "PSA at diagnosis was 6.2.", "2015-01-01", "year",
+                   psa_ng_ml=6.2, psa_context="initial_presentation_pre_adt")
+    assert evaluate_patient([CRPC, year_psa, bone])[0]["c5_met"] is False
+
+    psa = {**year_psa, "date_precision": "day", "event_date": "2015-03-01"}
+    fields, _ = evaluate_patient([CRPC, psa, bone])
+    assert fields["c5_met"] is True
+    assert fields["c5_psa_context"] == "initial_presentation_pre_adt"
+    assert fields["c5_gap_days"] == 9
+
+    adt = row("adt_start", "Started leuprolide.", "2014-06-01", agent="leuprolide")
+    fields, rejections = evaluate_patient([CRPC, psa, bone, adt])
+    assert fields["c5_met"] is False
+    assert "low_psa:c5_pre_adt_psa_after_adt_start" in rejections
+
+
+def test_c5_castrate_psa_must_follow_adt_and_context_can_be_inferred_pre_adt():
+    adt = row("adt_start", "Started leuprolide.", "2020-01-15", agent="leuprolide")
+    bone = row("bone_metastasis", "Bone scan: innumerable osseous metastases.", "2019-12-20")
+    early = row("low_psa", "At progression PSA was 3.0.", "2019-12-01", psa_ng_ml=3.0,
+                psa_context="symptomatic_crpc_progression")
+    fields, rejections = evaluate_patient([CRPC, adt, bone, early])
+    assert fields["c5_met"] is False
+    assert "low_psa:c5_castrate_psa_before_adt_start" in rejections
+    unlabeled = row("low_psa", "PSA 3.0 ng/mL.", "2019-12-01", psa_ng_ml=3.0, psa_context=None)
+    fields, _ = evaluate_patient([CRPC, adt, bone, unlabeled])
+    assert fields["c5_met"] is True
+    assert fields["c5_psa_context"] == "inferred_pre_adt"
+
+
+@pytest.mark.parametrize("quote,high", [
+    ("Bone scan: innumerable osseous metastases.", True),
+    ("More than 20 osseous metastases.", True),
+    ("25+ bone metastases on bone scan.", True),
+    ("Osseous metastases; PSA greater than 20.", False),
+    ("Bone metastasis with 25 mm lesions.", False),
+    ("Innumerable pulmonary nodules and two bone metastases.", False),
+    ("Extensive bone metastases.", False),
+])
+def test_c5_high_volume_counting(quote, high):
+    psa = row("low_psa", "At progression PSA was 4.5 ng/mL.", psa_ng_ml=4.5,
+              psa_context="symptomatic_crpc_progression")
+    bone = row("bone_metastasis", quote)
+    assert evaluate_patient([CRPC, psa, bone])[0]["c5_met"] is high
+
+
+def test_c7_anchors_on_first_adt_not_a_later_precise_start():
+    first = row("adt_start", "Started leuprolide in 2016.", "2016-01-01", "year",
+                agent="leuprolide")
+    later = row("adt_start", "Started ADT plus abiraterone.", "2020-01-01", "month",
+                agent="abiraterone")
+    crpc = _crpc("2020-05-20")
+    fields, rejections = evaluate_patient([MET, first, later, crpc])
+    assert fields["c7_met"] is False
+    assert "adt_start:c7_first_adt_start_not_dated" in rejections
+    # With no record of the 2016 start, an ARPI-only start is not an anchor.
+    arpi = row("adt_start", "Started enzalutamide.", "2020-01-01", "month", agent="enzalutamide")
+    assert evaluate_patient([MET, arpi, crpc])[0]["c7_met"] is False
+
+
+def test_c7_crpc_before_anchor_means_anchor_is_not_first_adt():
+    adt = _adt("2020-01-01")
+    earlier_crpc = _crpc("2019-06-01")
+    fields, rejections = evaluate_patient([MET, adt, earlier_crpc, _crpc("2020-05-20")])
+    assert fields["c7_met"] is False
+    assert "adt_start:c7_crpc_before_first_adt_start" in rejections
+
+
+@pytest.mark.parametrize("quote", [
+    "Progressed within 3 months of starting enzalutamide.",
+    "Castration-resistant progression within 4 months of abiraterone.",
+])
+def test_c7_rapid_progression_on_second_line_agent_is_not_c7(quote):
+    rapid = row("rapid_progression_on_adt", quote)
+    fields, rejections = evaluate_patient([MET, rapid])
+    assert fields["c7_met"] is False
+    assert "rapid_progression_on_adt:c7_second_line_hormonal_therapy" in rejections
+
+
+@pytest.mark.parametrize("quote", [
+    "Lung nodules, stable, likely benign; no metastatic disease.",
+    "Liver lesions, not consistent with metastases.",
+    "Adrenal nodule consistent with adenoma.",
+])
+def test_visceral_requires_an_asserted_malignancy_word(quote):
+    assert screen_finding(row("visceral_metastasis", quote, organ="liver")).startswith(
+        "no_metastatic_assertion")
+
+
+def test_negated_visceral_does_not_make_patient_metastatic():
+    fields, _ = evaluate_patient([CRPC, row(
+        "visceral_metastasis", "Liver lesions, not consistent with metastases.", organ="liver")])
+    assert fields["is_metastatic"] is not True
+
+
+def test_gleason_needs_a_gleason_context():
+    assert not gleason_in_quote(8, "PSA = 8")
+    assert gleason_in_quote(8, "Gleason 4+4=8")
+    assert gleason_in_quote(9, "GS 9")

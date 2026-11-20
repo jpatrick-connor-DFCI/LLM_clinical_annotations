@@ -55,11 +55,10 @@ from tasks.avpc.prompts import (  # noqa: E402
     NE_MARKER_SPECIMENS,
     PSA_CONTEXTS,
 )
-from tasks.longitudinal_subtype.mcrpc_gate import GATE_VERSION  # noqa: E402
-from tasks.longitudinal_subtype.met_veto import VETO_VERSION  # noqa: E402
+from tasks.mcrpc_gate import GATE_VERSION  # noqa: E402
+from tasks.met_veto import VETO_VERSION  # noqa: E402
 from tasks.nepc.ne_gate import NE_GATE_VERSION  # noqa: E402
 
-UNLABELED_STATUSES = {"failed", "not_run"}
 
 FINDING_SCHEMA = {
     "item": pl.Utf8,
@@ -109,10 +108,11 @@ for _name in CRITERIA:
         f"{_key}_met": pl.Boolean,
         f"{_key}_quote": pl.Utf8,
         f"{_key}_date": pl.Utf8,
+        f"{_key}_date_precision": pl.Utf8,
         f"{_key}_source_note_date": pl.Utf8,
     })
 LABEL_SCHEMA.update({
-    column: (pl.Int64 if column == "c7_interval_days" else pl.Utf8)
+    column: (pl.Int64 if column in {"c5_gap_days", "c7_interval_days"} else pl.Utf8)
     for column in COMPONENT_COLUMNS
 })
 LABEL_SCHEMA.update({
@@ -120,6 +120,7 @@ LABEL_SCHEMA.update({
     "n_avpc_criteria": pl.Int64,
     "is_avpc": pl.Boolean,
     "avpc_date": pl.Utf8,
+    "avpc_date_precision": pl.Utf8,
     "gate_rejections": pl.List(pl.Utf8),
 })
 BOOLEAN_LABELS = [c for c, t in LABEL_SCHEMA.items() if t == pl.Boolean]
@@ -197,7 +198,7 @@ def build_labels(findings, patient_status):
     rows = []
     for mrn, status in patient_status.items():
         fields, rejections = evaluate_patient(by_patient.get(mrn, []))
-        if status in UNLABELED_STATUSES:
+        if note_extraction.review_incomplete(status):
             # Unread notes are not evidence of absence: leave negatives unset.
             for column in BOOLEAN_LABELS:
                 if fields.get(column) is False:
@@ -226,6 +227,7 @@ SPEC = note_extraction.TaskSpec(
         "mcrpc_gate_version": GATE_VERSION,
         "met_veto_version": VETO_VERSION,
         "ne_gate_version": NE_GATE_VERSION,
+        "review_policy_version": note_extraction.REVIEW_POLICY_VERSION,
     },
     correction_hint=AVPC_CORRECTION_HINT,
     default_output_dir=Path(DEFAULT_DATA_PATH) / "LLM_avpc",

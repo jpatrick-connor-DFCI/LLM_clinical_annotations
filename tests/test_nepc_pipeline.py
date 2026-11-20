@@ -168,9 +168,14 @@ def test_end_to_end_labels_grounding_and_gate(collected, monkeypatch):
     assert nepc["nepc_date_source"] == "stated"
     assert nepc["has_stated_nepc_dx"] is True
     assert set(nepc["evidence_types"]) == {"nepc_diagnosis", "positive_ne_ihc"}
+    # The IHC shares a note with the small-cell diagnosis, so it is absorbed.
+    assert (nepc["nepc_t1"], nepc["nepc_t2"], nepc["nepc_t3"]) == (True, False, False)
+    # The earlier bare clinician assessment is broad evidence, not a pathology summary.
+    assert nepc["nepc_tier"] == "t1" and nepc["nepc_tier_date"] == "2021-04-02"
 
     negated = by_mrn[202]
     assert negated["nepc_status"] == "non_nepc"
+    assert negated["nepc_tier"] == "unclassified" and negated["nepc_t3"] is False
     assert negated["has_stated_nepc_dx"] is False
     assert negated["gate_rejections"] == ["nepc_diagnosis:negated_or_hedged:no"]
 
@@ -240,6 +245,7 @@ def test_pilot_mrns_limit_calls_but_label_whole_cohort(collected, monkeypatch):
     assert status == {101: "not_run", 202: "ok", 303: "no_trigger_notes"}
     row = labels.filter(pl.col("DFCI_MRN") == 101).row(0, named=True)
     assert row["nepc_status"] is None
+    assert row["nepc_tier"] is None and row["nepc_t1"] is None
 
 
 def test_validate_finding_rejects_unknown_evidence_type():
@@ -263,3 +269,36 @@ def test_unparseable_reply_gets_one_correction_retry():
     )
     assert ledger["status"] == "ok" and len(provider.calls) == 2
     assert "failed machine validation" in provider.calls[1][-1]["content"]
+
+
+def test_conventional_pathology_without_ne_terms_reaches_reference_group(tmp_path, monkeypatch):
+    text = "Prostate biopsy: acinar adenocarcinoma, Gleason 3+4=7."
+    pl.DataFrame({
+        "RPT_ID": [1], "DFCI_MRN": [101], "EVENT_DATE": ["2021-04-02"],
+        "PROC_DESC": ["prostate biopsy"], "RPT_TYPE": ["Surgical"],
+        "RPT_TEXT": [text], "FILE": ["pull/conventional.json"],
+    }).write_parquet(tmp_path / "PATHOLOGY_NOTES.parquet")
+    collect_nepc_dx_notes.run(_collector_args(
+        tmp_path, notes_parquet=[tmp_path / "PATHOLOGY_NOTES.parquet"], mrns="101,202",
+    ))
+
+    class ConventionalProvider(FakeProvider):
+        def call_with_retry(self, client, model, messages, max_retries):
+            self.calls.append(json.loads(messages[1]["content"]))
+            return json.dumps({"findings": [{
+                "evidence_type": "prostate_adenocarcinoma", "specimen_site": "prostate biopsy",
+                "quote": text, "stated_date": None, "confidence": "high",
+            }]}), None
+
+    provider = ConventionalProvider()
+    monkeypatch.setattr(runner, "get_provider", lambda name: provider)
+    labels = runner.run(_runner_args(tmp_path))
+    assert len(provider.calls) == 1
+    by_mrn = {r["DFCI_MRN"]: r for r in labels.iter_rows(named=True)}
+    assert by_mrn[101]["nepc_tier"] == "t4"
+    assert by_mrn[101]["nepc_status"] == "non_nepc"
+    assert by_mrn[101]["nepc_t4_supporting_quotes"] == [text]
+    assert by_mrn[202]["nepc_tier"] == "unclassified"
+    rebuilt = runner.run(_runner_args(tmp_path, rebuild_labels_only=True))
+    assert rebuilt.equals(labels)
+    assert len(provider.calls) == 1

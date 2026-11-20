@@ -1,4 +1,4 @@
-"""Persistence for the binary subtype patient-snippet Parquet artifact."""
+"""Persistence for reusable patient-snippet Parquet artifacts."""
 
 import json
 from datetime import datetime, timezone
@@ -9,6 +9,7 @@ import polars as pl
 from preprocessing.parquet_io import write_parquet_atomic
 
 
+# Retain the historical artifact name and format identifier for bundle compatibility.
 SNIPPET_BUNDLE_FILENAME = "LLM_NEPC_classifier_patient_snippets.parquet"
 SNIPPET_BUNDLE_FORMAT = "binary_nepc_patient_snippets"
 # Version 3 defines the flat cohort/snippet Parquet contract.

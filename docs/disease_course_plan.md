@@ -242,7 +242,7 @@ Add `both_hold(rows)` to `tasks/onset.py`:
 | Evidence collection | `preprocessing/evidence.py` (`collect_note_evidence`, `add_collector_args`, `note_task_paths`, `downstream_paths`) |
 | Per-note runner | `tasks/note_extraction.py`: `TaskSpec`, grounding, ledger, resume, `annotate_trial_context`, `patient_review_status` |
 | Dates | `tasks/onset.py` (`earliest`, `prefer_onset`, `date_interval`); `preprocessing/notes.to_iso_date` |
-| Gates | `tasks/nepc/ne_gate.screen_asserted`; `tasks/longitudinal_subtype/mcrpc_gate.py`; `tasks/trial_guard.py` |
+| Gates | `tasks/nepc/ne_gate.screen_asserted`; `tasks/mcrpc_gate.py`; `tasks/trial_guard.py` |
 | Number check and planning cues | `tasks/avpc/criteria.py`: `number_in_quote`, `ADT_PLANNED` |
 | Field validation pattern | `tasks/avpc/run_avpc_extraction.py` |
 

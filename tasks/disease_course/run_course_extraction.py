@@ -61,8 +61,8 @@ from tasks.disease_course.statement_gate import (  # noqa: E402
     usable_course_findings,
 )
 from tasks.disease_course.therapy import THERAPY_VERSION  # noqa: E402
-from tasks.longitudinal_subtype.mcrpc_gate import GATE_VERSION  # noqa: E402
-from tasks.longitudinal_subtype.met_veto import VETO_VERSION  # noqa: E402
+from tasks.mcrpc_gate import GATE_VERSION  # noqa: E402
+from tasks.met_veto import VETO_VERSION  # noqa: E402
 from tasks.nepc.ne_gate import NE_GATE_VERSION  # noqa: E402
 
 UNLABELED_STATUSES = {"failed", "not_run"}

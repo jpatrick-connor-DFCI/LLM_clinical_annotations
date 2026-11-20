@@ -12,7 +12,17 @@ least one does. The cited quote and date come from the earliest gated finding
 (tasks/onset.py: a certainly-earlier date wins; within overlapping dates the
 more precise one wins). `has_stated_nepc_dx` is the strict tier for sensitivity
 analyses: a stated diagnosis or transformation, not differentiation or IHC
-alone.
+alone. Supporting PD and adenocarcinoma diagnoses do not set the legacy
+broad `nepc_status` by themselves.
+
+Four pathology-based groups (tasks/nepc/tiers.py) are added alongside:
+`nepc_t1` (definitive NE carcinoma, including mixed tumors), `nepc_t2` (poorly
+or dedifferentiated carcinoma with NE features), `nepc_t3` (adenocarcinoma with
+NE differentiation), and `nepc_t4` (documented conventional adenocarcinoma with
+complete review and no gated NE evidence). Cohort membership supplies clinical
+eligibility. Pathology reports and explicit clinician pathology summaries count.
+`nepc_tier` selects t1 > t2 > t3 > t4; insufficient evidence is unclassified,
+not a reference negative. Legacy broad `nepc_status` is not definitive NEPC.
 
 Outputs (under <output-dir>):
   nepc_findings.parquet          grounded note-level findings
@@ -48,11 +58,15 @@ from tasks.nepc.prompts import (  # noqa: E402
     NEPC_PROMPT_VERSION,
     NEPC_SYSTEM_PROMPT,
 )
+from tasks.nepc.tiers import (  # noqa: E402
+    TIER_VERSION, TIERS, has_ne_evidence, highest_tier, patient_tiers,
+)
 from tasks.onset import earliest  # noqa: E402
 
-STATED_DX_TYPES = {"nepc_diagnosis", "histologic_transformation"}
+# Mixed tumors were part of nepc_diagnosis before prompt v3; keeping them here
+# leaves has_stated_nepc_dx unchanged.
+STATED_DX_TYPES = {"nepc_diagnosis", "histologic_transformation", "mixed_ne_carcinoma"}
 # Patients whose notes were never read have no label, not a negative one.
-UNLABELED_STATUSES = {"failed", "not_run"}
 
 FINDING_SCHEMA = {
     "evidence_type": pl.Utf8,
@@ -76,6 +90,21 @@ LABEL_SCHEMA = {
     "evidence_types": pl.List(pl.Utf8),
     "n_gated_findings": pl.Int64,
     "gate_rejections": pl.List(pl.Utf8),
+    **{
+        column: dtype
+        for tier in TIERS
+        for column, dtype in (
+            (f"nepc_{tier}", pl.Boolean),
+            (f"nepc_{tier}_date", pl.Utf8),
+            (f"nepc_{tier}_date_precision", pl.Utf8),
+            (f"nepc_{tier}_evidence_type", pl.Utf8),
+            (f"nepc_{tier}_quote", pl.Utf8),
+            (f"nepc_{tier}_supporting_quotes", pl.List(pl.Utf8)),
+        )
+    },
+    "nepc_tier": pl.Utf8,
+    "nepc_tier_date": pl.Utf8,
+    "nepc_tier_date_precision": pl.Utf8,
 }
 
 
@@ -110,12 +139,13 @@ def build_labels(findings, patient_status):
     gated, rejections = gate_findings(findings)
     rows = []
     for mrn, status in patient_status.items():
-        mine = gated.get(mrn, [])
+        gated_rows = gated.get(mrn, [])
+        mine = [r for r in gated_rows if has_ne_evidence(r)]
         first = earliest(mine)
         stated = earliest([r for r in mine if r["evidence_type"] in STATED_DX_TYPES])
         if first is not None:
             nepc_status = "nepc"
-        elif status in UNLABELED_STATUSES:
+        elif note_extraction.review_incomplete(status):
             nepc_status = None
         else:
             nepc_status = "non_nepc"
@@ -137,8 +167,34 @@ def build_labels(findings, patient_status):
             "evidence_types": sorted({r["evidence_type"] for r in mine}),
             "n_gated_findings": len(mine),
             "gate_rejections": sorted(set(rejections.get(mrn, []))),
+            **_tier_columns(gated_rows, status=status),
         })
     return rows
+
+
+def _tier_columns(gated_rows, status):
+    """Group flags and onsets; incomplete review cannot resolve negatives."""
+    complete = status == "ok"
+    labeled = not note_extraction.review_incomplete(status)
+    tier_rows = patient_tiers(gated_rows, complete=complete)
+    columns = {}
+    for tier in TIERS:
+        first = earliest(tier_rows[tier])
+        columns.update({
+            f"nepc_{tier}": True if first is not None else (False if labeled else None),
+            f"nepc_{tier}_date": first and first["event_date"],
+            f"nepc_{tier}_date_precision": first and first["date_precision"],
+            f"nepc_{tier}_evidence_type": first and first["evidence_type"],
+            f"nepc_{tier}_quote": first and first["quote"],
+            f"nepc_{tier}_supporting_quotes": (
+                first.get("supporting_quotes", [first["quote"]]) if first else []
+            ),
+        })
+    top = highest_tier(tier_rows)
+    columns["nepc_tier"] = top or ("unclassified" if labeled else None)
+    columns["nepc_tier_date"] = top and columns[f"nepc_{top}_date"]
+    columns["nepc_tier_date_precision"] = top and columns[f"nepc_{top}_date_precision"]
+    return columns
 
 
 SPEC = note_extraction.TaskSpec(
@@ -151,7 +207,11 @@ SPEC = note_extraction.TaskSpec(
     validate_finding=validate_finding,
     build_labels=build_labels,
     label_schema=LABEL_SCHEMA,
-    label_versions={"ne_gate_version": NE_GATE_VERSION},
+    label_versions={
+        "ne_gate_version": NE_GATE_VERSION,
+        "nepc_tier_version": TIER_VERSION,
+        "review_policy_version": note_extraction.REVIEW_POLICY_VERSION,
+    },
     correction_hint=NEPC_CORRECTION_HINT,
     default_output_dir=Path(DEFAULT_DATA_PATH) / "LLM_nepc",
     collector_hint="Run preprocessing/cli/collect_nepc_dx_notes.py first.",

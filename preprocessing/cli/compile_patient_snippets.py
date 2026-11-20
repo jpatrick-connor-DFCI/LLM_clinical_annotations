@@ -1,4 +1,4 @@
-"""Compile and persist the binary subtype classifier's patient snippets."""
+"""Compile and persist reusable patient snippet bundles."""
 
 import argparse
 import sys
@@ -14,7 +14,7 @@ from preprocessing.bundles.snippet_bundle import (  # noqa: E402
 )
 from preprocessing.config import (  # noqa: E402
     DEFAULT_PROSTATE_MRN_CSV,
-    DEFAULT_OUTPUT_DIR,
+    DEFAULT_BUNDLE_OUTPUT_DIR,
     DEFAULT_PROFILE_NOTE_PATHS,
     SNIPPET_PROFILES,
 )
@@ -27,14 +27,14 @@ from preprocessing.notes import (  # noqa: E402
 from preprocessing.snippets import build_patient_snippets  # noqa: E402
 from preprocessing.triggers import TRIGGER_REGEX, combined_text_pattern  # noqa: E402
 
-_PROFILE = SNIPPET_PROFILES["binary_subtype"]
+_PROFILE = SNIPPET_PROFILES["patient_snippets"]
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Clean and trigger-scan prostate notes, rank patient snippets, and "
-            "save the standalone artifact required by tasks/binary_subtype/run_NEPC_classifier.py."
+            "save a standalone patient snippet bundle for review."
         )
     )
     parser.add_argument(
@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR / SNIPPET_BUNDLE_FILENAME,
+        default=DEFAULT_BUNDLE_OUTPUT_DIR / SNIPPET_BUNDLE_FILENAME,
     )
     parser.add_argument("--max-notes-per-patient", type=int, default=75)
     parser.add_argument(
@@ -89,7 +89,7 @@ def run(args):
     )
     if parquet_paths is not None and selected_mrns is None:
         raise ValueError(
-            "Binary subtype classification is prostate-specific. Direct "
+            "Patient snippet collection is prostate-specific. Direct "
             "PROFILE_DATA parquet runs require --mrns or --mrn-file to define "
             "the prostate cohort."
         )

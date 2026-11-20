@@ -1,8 +1,7 @@
 """Shared plumbing for the longitudinal, patient-chunked LLM extraction pipelines.
 
-All four pipelines (Gleason timeline, AVPC/NEPC criteria timeline, cancer stage,
-binary subtype) collect trigger-bearing notes and snippet them via
-`preprocessing`; the longitudinal pipelines additionally de-duplicate per
+The extraction pipelines collect trigger-bearing notes and snippet them via
+`preprocessing`; the chunked timeline pipelines additionally de-duplicate per
 patient and pack snippets into one or more payload-sized chunks for a single
 LLM call per chunk.
 """
@@ -70,7 +69,7 @@ def _candidate_to_record(candidate):
     """Convert a scan_note_candidates() candidate into the record shape dedupe/pack expect.
 
     scan_note_candidates (preprocessing/snippets.py) is the ProcessPoolExecutor-parallel
-    per-note scan shared with the binary_subtype path; its candidates carry `mrn`/`raw_note_id`
+    shared per-note scan; its candidates carry `mrn`/`raw_note_id`
     instead of `DFCI_MRN`/`note_uid`, so this adapts field names rather than duplicating
     the scan logic.
     """
@@ -90,20 +89,21 @@ def dedupe_candidates(candidates):
     """Collapse copy-forward notes with identical cleaned snippet text per patient.
 
     `candidates` is {mrn: [candidate, ...]} as returned by scan_note_candidates().
-    Dedup key is (mrn, snippet); the EARLIEST note_date wins as the provenance/
+    Dedup key is (mrn, note_type, snippet); the EARLIEST note_date wins as the provenance/
     fallback date (so criterion-onset dates are not inflated). This must run in the
     parent process (never per-worker) because the same snippet can be produced by
     notes scanned in different workers.
 
-    Yields one record per kept (mrn, snippet) pair: note_uid, DFCI_MRN, note_date
+    Yields one record per kept (mrn, note_type, snippet) combination: note_uid, DFCI_MRN, note_date
     (ISO or None), note_type, trigger_categories (sorted list), snippet.
     """
-    # (mrn, snippet) -> chosen record, keeping the earliest note_date.
+    # Preserve source type: pathology carries diagnostic authority that a copied
+    # clinician entry may not. Keep the earliest date within each source type.
     deduped = {}
     for mrn, items in candidates.items():
         for candidate in items:
             record = _candidate_to_record(candidate)
-            key = (mrn, record["snippet"])
+            key = (mrn, record["note_type"], record["snippet"])
             existing = deduped.get(key)
             if existing is None:
                 deduped[key] = record
@@ -306,7 +306,7 @@ def group_patient_snippets(
         dynamic_ncols=True,
     ):
         # Tiebreaker on `snippet` after note_date: chunk_index is a stage-2 resume
-        # key (build_nepc_timeline.py), so sort order must be stable regardless of
+        # key for timeline extraction, so sort order must be stable regardless of
         # scan parallelism / worker count or dict/hash-order variation across runs.
         recs.sort(key=lambda r: (r["note_date"] or "9999-99-99", r["snippet"]))
         chunks, current, current_len = [], [], 0
@@ -350,9 +350,9 @@ def evidence_scan_config_key(
     notes are eligible even though it doesn't change any numeric knob.
 
     `context_overrides` ({note_type: chars or None}) is hashed only when set, so
-    fingerprints of evidence built without overrides are unchanged.
+    beyond the shared deduplication version.
     Trial-context preservation and its guard version are likewise hashed only
-    when enabled, leaving legacy collectors' fingerprints unchanged.
+    when enabled.
     """
     hasher = hashlib.sha256()
     for name in ("DFCI_MRN", "EVENT_DATE", "NOTE_TYPE", "CLINICAL_TEXT"):
@@ -360,6 +360,7 @@ def evidence_scan_config_key(
             col = notes_df.get_column(name)
             hasher.update(name.encode())
             hasher.update(str(col.hash().sum()).encode())
+    hasher.update(b"dedupe-source-type-v2")
     for label in sorted(trigger_regex):
         hasher.update(label.encode())
         hasher.update(trigger_regex[label].encode())

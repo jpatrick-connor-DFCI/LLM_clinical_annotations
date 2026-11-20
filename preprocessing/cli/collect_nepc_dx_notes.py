@@ -1,7 +1,9 @@
 """Stage 1 — Collect notes that may document neuroendocrine prostate cancer.
 
-Scans every cohort patient's notes for neuroendocrine / small-cell language and
-NE IHC markers and writes one evidence row per deduplicated note. The NEPC task
+Scans every cohort patient's notes for neuroendocrine / small-cell language,
+NE IHC markers, and adenocarcinoma / prostate histology. The latter includes
+reports with no NE language, needed for the conventional reference group.
+Writes one evidence row per deduplicated note. The NEPC task
 runner (tasks/nepc/run_nepc_extraction.py) then makes one LLM call per note.
 
 Trigger-bearing Pathology reports are kept whole (capped at the per-note

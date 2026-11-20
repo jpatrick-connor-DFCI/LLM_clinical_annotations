@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 from preprocessing.config import (  # noqa: E402
     DEFAULT_PROSTATE_MRN_CSV,
     DEFAULT_PROFILE_NOTE_PATHS,
-    DEFAULT_OUTPUT_DIR,
+    DEFAULT_BUNDLE_OUTPUT_DIR,
     NOTE_BUNDLE_FILENAME,
 )
 from preprocessing.notes import (  # noqa: E402
@@ -24,12 +24,12 @@ from preprocessing.notes import (  # noqa: E402
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Compile prostate notes for a prostate MRN list into a Parquet bundle "
-        "for binary_subtype. Defaults to reading the merged PROFILE_DATA note parquets."
+        "for reuse across tasks. Defaults to reading the merged PROFILE_DATA note parquets."
     )
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR / NOTE_BUNDLE_FILENAME,
+        default=DEFAULT_BUNDLE_OUTPUT_DIR / NOTE_BUNDLE_FILENAME,
         help="Destination Parquet note bundle to write.",
     )
     parser.add_argument(

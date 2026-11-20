@@ -6,7 +6,7 @@ payload-sized chunks, and writes them as evidence for the LLM step.
 The downstream task answers one question -- does the record assert distant
 metastatic prostate cancer, and when was it first documented -- so retrieval
 here is deliberately BROAD and precision is deferred to
-tasks/longitudinal_subtype/met_veto.py. That inversion is the opposite of what the trigger
+tasks/met_veto.py. That inversion is the opposite of what the trigger
 set alone suggests: `metasta\\w*` fires on every "no evidence of metastatic
 disease" in every surveillance scan, and `bone scan` fires on the negative ones
 too. Those notes must be retrieved anyway, because the negation is exactly what

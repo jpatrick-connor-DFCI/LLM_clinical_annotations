@@ -11,7 +11,7 @@ Precision-over-recall properties, shared with tasks/nepc_diagnosis:
     preprocessing.grounding.find_quote_support). A quote grounded in a
     differently-dated note is rejected, never silently re-dated.
   - Every grounded quote must clear the deterministic gate in
-    tasks/longitudinal_subtype/met_veto.py, which the model cannot override.
+    tasks/met_veto.py, which the model cannot override.
   - The adjudication stage may only cite a quote that came from a validated
     candidate; an invented quote downgrades the patient to negative.
 
@@ -72,7 +72,7 @@ from tasks.met_diagnosis.prompts import (  # noqa: E402
     MET_DX_SYNTHESIS_PROMPT,
     PROMPT_SCHEMA_VERSION,
 )
-from tasks.longitudinal_subtype.met_veto import VETO_VERSION, screen_quote  # noqa: E402
+from tasks.met_veto import VETO_VERSION, screen_quote  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_met_diagnosis"
 

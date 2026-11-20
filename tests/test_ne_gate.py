@@ -3,6 +3,20 @@ import pytest
 from tasks.nepc.ne_gate import positive_ihc_markers, screen_asserted, screen_ne_quote, NE_TERM
 
 
+@pytest.mark.parametrize("quote,expected", [
+    ("PSA positive. Synaptophysin staining is entirely negative.", []),
+    ("PSA positive, synaptophysin is completely negative.", []),
+    ("Synaptophysin negative. Chromogranin strongly positive.", ["chromogranin"]),
+    ("Synaptophysin negative, chromogranin strongly positive.", ["chromogranin"]),
+    ("Synaptophysin negative and chromogranin strongly positive.", ["chromogranin"]),
+    ("Synaptophysin and chromogranin A are positive.", ["chromogranin a", "synaptophysin"]),
+    ("Positive for synaptophysin, chromogranin A and CD56.",
+     ["cd56", "chromogranin a", "synaptophysin"]),
+])
+def test_panel_polarity_stays_with_its_marker_clause(quote, expected):
+    assert positive_ihc_markers(quote)[0] == expected
+
+
 @pytest.mark.parametrize(
     "quote,evidence_type",
     [
@@ -163,3 +177,45 @@ def test_trial_population_requirements_are_not_patient_findings():
     assert screen_ne_quote(diagnosis, "nepc_diagnosis")[0] is False
     assert screen_asserted(diagnosis, NE_TERM)[0] is False
     assert screen_ne_quote(ihc, "positive_ne_ihc")[0] is False
+
+
+@pytest.mark.parametrize("quote,expected", [
+    ("Focal weak synaptophysin staining", True),
+    ("Diffuse synaptophysin staining", True),
+    ("No focal weak synaptophysin staining", False),
+    ("Focal weak synaptophysin staining is not identified", False),
+    ("Focal weak synaptophysin staining is nonspecific", False),
+    ("Focal weak synaptophysin staining pending", False),
+])
+def test_explicit_stain_intensity_is_a_result_only_when_asserted(quote, expected):
+    assert screen_ne_quote(quote, "positive_ne_ihc")[0] is expected
+
+
+@pytest.mark.parametrize("quote,evidence_type", [
+    ("Discussed with patient the possibility of NEPC.", "nepc_diagnosis"),
+    ("NE markers were negative; small cell carcinoma unlikely.", "small_cell_histology"),
+    ("Small cell carcinoma less likely.", "small_cell_histology"),
+    ("Small cell carcinoma, unlikely.", "small_cell_histology"),
+    ("Small cell carcinoma - doubtful.", "small_cell_histology"),
+    ("Question of small cell carcinoma.", "small_cell_histology"),
+    ("?NEPC", "nepc_diagnosis"),
+    ("NEPC?", "nepc_diagnosis"),
+    ("Plan repeat biopsy to look for small cell carcinoma.", "small_cell_histology"),
+    ("Hypothesis of treatment-emergent NEPC.", "histologic_transformation"),
+    ("Tumor shows neuroendocrine features? Awaiting stains", "ne_differentiation"),
+])
+def test_v6_hedges_and_questions_are_rejected(quote, evidence_type):
+    ok, reason = screen_ne_quote(quote, evidence_type)
+    assert not ok and reason.startswith("negated_or_hedged:")
+
+
+def test_question_in_another_sentence_does_not_hedge():
+    quote = "Prostate biopsy: small cell carcinoma. Is this new? Yes."
+    assert screen_ne_quote(quote, "small_cell_histology") == (True, None)
+
+
+def test_screen_any_asserted_needs_one_asserted_occurrence():
+    from tasks.nepc.ne_gate import screen_any_asserted
+    assert screen_any_asserted("No NEPC before. Now NEPC confirmed.", NE_TERM) == (True, None)
+    assert screen_any_asserted("No NEPC.", NE_TERM)[0] is False
+    assert screen_any_asserted("Adenocarcinoma.", NE_TERM) == (False, "no_term")

@@ -212,4 +212,5 @@ def test_rebuild_labels_only_is_stable(course, monkeypatch):
 
 def test_existing_fingerprints_unchanged():
     assert run_fingerprint(AVPC_SPEC, "e", "p", "m") == "02d4991449698b3eb9de"
-    assert run_fingerprint(NEPC_SPEC, "e", "p", "m") == "d0ad7b81d8b85bdf3a37"
+    # NEPC prompt v4 (four pathology groups) deliberately changed this hash.
+    assert run_fingerprint(NEPC_SPEC, "e", "p", "m") == "39630ef046df9bf18f00"

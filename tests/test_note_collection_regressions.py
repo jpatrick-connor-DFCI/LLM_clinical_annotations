@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from preprocessing.cli import collect_avpc_notes, collect_nepc_dx_notes
+from preprocessing.cli import collect_arlpc_notes, collect_avpc_notes, collect_nepc_dx_notes
 from preprocessing.longitudinal import (
     evidence_scan_config_key,
     read_scan_config_meta,
@@ -14,6 +14,7 @@ from preprocessing.longitudinal import (
 from preprocessing.snippets import _scan_note_row
 from preprocessing.triggers import NEPC_DX_TRIGGER_REGEX
 from tasks import note_extraction
+from tasks.arlpc import run_arlpc_extraction
 from tasks.avpc import run_avpc_extraction
 from tasks.nepc import run_nepc_extraction
 from tasks import trial_guard
@@ -42,6 +43,37 @@ def _collector_args(root, source, **overrides):
     )
     args.update(overrides)
     return SimpleNamespace(**args)
+
+
+@pytest.mark.parametrize("result", ["heterogeneous", "diminished", "decreased", "rare", "scattered"])
+def test_arlpc_collector_retains_supported_reduced_expression(tmp_path, result):
+    from tasks.arlpc.ar_gate import screen_ar_ihc
+
+    text = f"Prostate adenocarcinoma. AR is {result}."
+    assert screen_ar_ihc(text, "reduced", "prostate") == (True, None, True)
+    source = _write_pathology(tmp_path, [text])
+    path = collect_arlpc_notes.run(_collector_args(tmp_path, source))
+    assert pl.read_parquet(path)["snippet"].to_list() == [text]
+
+
+def test_dedup_preserves_pathology_authority_and_same_type_copy_forward():
+    from preprocessing.longitudinal import dedupe_candidates
+    from preprocessing.evidence import _unique_note_uids
+    from tasks.nepc.tiers import patient_tiers
+
+    quote = "Small cell carcinoma of prostatic origin."
+    base = dict(mrn=101, snippet=quote, trigger_categories=["small_cell"])
+    candidates = {101: [
+        dict(base, note_type="Clinician", note_date="2021-01-01"),
+        dict(base, note_type="Pathology", note_date="2021-01-02"),
+        dict(base, note_type="Pathology", note_date="2021-01-03"),
+    ]}
+    records = _unique_note_uids(list(dedupe_candidates(candidates)))
+    assert [(r["note_type"], r["note_date"]) for r in records] == [
+        ("Clinician", "2021-01-01"), ("Pathology", "2021-01-02")]
+    rows = [dict(r, quote=r["snippet"], evidence_type="nepc_diagnosis",
+                 event_date=r["note_date"], date_precision="day") for r in records]
+    assert [r["note_type"] for r in patient_tiers(rows)["t1"]] == ["Pathology"]
 
 
 @pytest.mark.parametrize("marker", ["NSE", "INSM-1", "CD 56"])
@@ -106,14 +138,15 @@ def test_nepc_collector_rejects_old_evidence_version(tmp_path):
 @pytest.mark.parametrize("prefix,collector,runner", [
     ("avpc", collect_avpc_notes, run_avpc_extraction),
     ("nepc", collect_nepc_dx_notes, run_nepc_extraction),
+    ("arlpc", collect_arlpc_notes, run_arlpc_extraction),
 ])
 @pytest.mark.parametrize("pilot", [[], [202]])
 def test_notebook_pilot_limits_calls_but_preserves_cohort(
     tmp_path, monkeypatch, prefix, collector, runner, pilot,
 ):
     source = _write_pathology(tmp_path, [
-        "Prostate biopsy: small cell carcinoma, specimen A.",
-        "Prostate biopsy: small cell carcinoma, specimen B.",
+        "Prostate biopsy: small cell carcinoma, AR negative, specimen A.",
+        "Prostate biopsy: small cell carcinoma, AR negative, specimen B.",
     ])
     cohort = tmp_path / "cohort.csv"
     pl.DataFrame({"DFCI_MRN": [101, 202, 303]}).write_csv(cohort)
@@ -126,7 +159,7 @@ def test_notebook_pilot_limits_calls_but_preserves_cohort(
         REBUILD_LABELS_ONLY=False, OVERWRITE=False,
         shell_join=lambda parts: " ".join(map(str, parts)),
     )
-    notebook = Path(__file__).resolve().parents[1] / "notebooks" / f"{prefix}.ipynb"
+    notebook = Path(__file__).resolve().parents[1] / "notebooks" / "prostate_subtype" / f"{prefix}.ipynb"
     cells = json.loads(notebook.read_text())["cells"]
     command_cell = next(
         "".join(cell["source"]) for cell in cells
@@ -158,7 +191,8 @@ def test_notebook_pilot_limits_calls_but_preserves_cohort(
         assert "specimen B" in provider.calls[0]
     assert set(labels["DFCI_MRN"]) == {101, 202, 303}
     if pilot:
-        assert labels.filter(pl.col("DFCI_MRN") == 101)["review_status"].item() == "not_run"
+        status_column = "arlpc_review_status" if prefix == "arlpc" else "review_status"
+        assert labels.filter(pl.col("DFCI_MRN") == 101)[status_column].item() == "not_run"
 
 
 def _write_clinician(root, texts):

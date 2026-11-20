@@ -1,4 +1,4 @@
-"""Tests for the metastatic-disease quote gate (tasks/longitudinal_subtype/met_veto.py).
+"""Tests for the metastatic-disease quote gate (tasks/met_veto.py).
 
 The mCRPC gate's metastatic screen defers to this gate, so these are the
 executable form of its precision contract. Two boundaries carry most of the
@@ -13,7 +13,7 @@ weight:
 
 import pytest
 
-from tasks.longitudinal_subtype.met_veto import screen_quote
+from tasks.met_veto import screen_quote
 
 
 # --------------------------------------------------------------------------

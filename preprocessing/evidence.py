@@ -2,8 +2,8 @@
 
 The NEPC and AVPC pipelines make one LLM call per trigger-bearing note, so
 their evidence is one row per deduplicated note rather than per-patient packed
-chunks. `collect_note_evidence` generalizes `collect_nepc_notes.run` for that
-shape and keeps its reuse/raise/overwrite contract:
+chunks. `collect_note_evidence` implements their shared reuse/raise/overwrite
+contract:
 
   - unchanged scan settings reuse the existing evidence and skip the scan;
   - changed settings raise unless --overwrite is passed;

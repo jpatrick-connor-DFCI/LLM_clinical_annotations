@@ -22,7 +22,7 @@ Artifacts (under <output-dir>, see preprocessing.evidence.note_task_paths):
 
 Resume: a note whose ledger row is `ok` or `ok_with_rejections` is never
 re-called. A `failed:<err>` note is skipped on a plain re-run and retried with
---retry-failures (which retries only failures), as in run_NEPC_classifier.py.
+--retry-failures (which retries only failures).
 Every attempt carries an attempt_id; compaction keeps only the findings of each
 note's final attempt, so a crash between appends cannot double-count.
 
@@ -68,6 +68,15 @@ APPEND_BATCH_NOTES = 200
 DEFAULT_OUTPUT_CORRECTION_RETRIES = 1
 CONFIDENCE_VALUES = {"high", "medium", "low"}
 OK_STATUSES = {"ok", "ok_with_rejections"}
+# How a patient's review status bounds its labels. v2: a partial review (some
+# trigger notes failed) can still establish a positive but never a negative,
+# exactly like failed / not_run. Recorded in each per-note task's label meta.
+REVIEW_POLICY_VERSION = "review-policy-v2"
+
+
+def review_incomplete(status):
+    """True when unread trigger notes remain: failed, not_run or partial:K/N."""
+    return status in {"failed", "not_run"} or str(status).startswith("partial:")
 
 PROVENANCE_SCHEMA = {
     "DFCI_MRN": pl.Int64,

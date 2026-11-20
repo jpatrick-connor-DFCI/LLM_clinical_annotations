@@ -28,10 +28,8 @@ properties of metastasis language drive those checks:
      quote's whole site set rather than of one term occurrence, so it runs
      after the loop.
 
-Bump VETO_VERSION on any change to the patterns or windows. The binary and
-longitudinal subtype run fingerprints hash it (as mcrpc_gate.MET_VETO_VERSION),
-so a changed gate forces --overwrite instead of silently mixing outputs
-screened by two different gates.
+Bump VETO_VERSION on any change to the patterns or windows. Label builders record it
+in their metadata and reapply this gate when rebuilding labels.
 """
 
 import re

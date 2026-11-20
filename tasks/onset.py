@@ -1,7 +1,6 @@
 """Choosing the earliest dated finding when dates carry different precisions.
 
-Same rule as `tasks/longitudinal_subtype/build_nepc_timeline._prefer_onset`,
-which stays in place so that pipeline is unchanged. Each finding is a dict with
+Each finding is a dict with
 `event_date` (ISO), `date_precision` (year | month | day | unknown), and
 `source_note_date`.
 """

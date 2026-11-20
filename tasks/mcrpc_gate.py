@@ -32,14 +32,14 @@ audit.
   and its "progression to" cue would reject "progression to castration
   resistance", which here is the affirmative statement.
 
-Bump GATE_VERSION on any change to these patterns or windows. Both run
-fingerprints hash it together with the met gate's VETO_VERSION, so a changed
-gate forces --overwrite instead of mixing outputs screened by two gates.
+Bump GATE_VERSION on any change to these patterns or windows. Active label
+builders record it alongside the met gate's VETO_VERSION in their metadata;
+--rebuild-labels-only reapplies changed gates without new LLM calls.
 """
 
 import re
 
-from tasks.longitudinal_subtype.met_veto import (
+from tasks.met_veto import (
     BOILERPLATE,
     BOILERPLATE_WINDOW_CHARS,
     NEGATION_WINDOW_CHARS,
@@ -49,7 +49,7 @@ from tasks.longitudinal_subtype.met_veto import (
 )
 # Re-exported: screen_metastatic_quote defers to the met gate, so the run
 # fingerprints import its version from here alongside GATE_VERSION.
-from tasks.longitudinal_subtype.met_veto import VETO_VERSION as MET_VETO_VERSION  # noqa: F401
+from tasks.met_veto import VETO_VERSION as MET_VETO_VERSION  # noqa: F401
 
 GATE_VERSION = "mcrpc-gate-v1"
 

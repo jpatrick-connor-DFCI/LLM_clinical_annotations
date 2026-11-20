@@ -8,8 +8,7 @@ quote.
 
 Criterion numbering follows the PAPER (Aparicio et al., Clin Cancer Res 2013,
 Table 1): C2 = exclusively visceral metastases, C3 = predominantly lytic bone
-metastases. The older binary_subtype / longitudinal_subtype pipelines use the
-reverse order for those two.
+metastases.
 
 Bump AVPC_PROMPT_VERSION on any semantic or output-contract change. The run
 fingerprint hashes it and the prompt text.

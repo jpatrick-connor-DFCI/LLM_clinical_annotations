@@ -33,7 +33,7 @@ metadata records it.
 
 import re
 
-from tasks.longitudinal_subtype.mcrpc_gate import (
+from tasks.mcrpc_gate import (
     _CASTRATING_THERAPY,
     screen_castration_resistant_quote,
     screen_metastatic_quote,

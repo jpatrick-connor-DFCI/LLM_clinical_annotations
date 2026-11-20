@@ -28,7 +28,7 @@ from tasks.met_diagnosis.prompts import (
     MET_DX_MAP_PROMPT,
     MET_DX_SYNTHESIS_PROMPT,
 )
-from tasks.longitudinal_subtype.met_veto import screen_quote
+from tasks.met_veto import screen_quote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

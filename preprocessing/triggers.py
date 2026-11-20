@@ -78,10 +78,10 @@ TRIGGER_REGEX = {
 }
 
 
-# Triggers for the per-note NEPC diagnosis pipeline (tasks/nepc). Narrower than
-# TRIGGER_REGEX["nepc"]: bare "transform..." and "dedifferentiat..." matched
-# mostly unrelated text ("transformed lymphoma", "transformation of care"), so
-# only the neuroendocrine vocabulary and the NE IHC markers remain.
+# Triggers for the per-note NEPC pathology groups (tasks/nepc). NE terms
+# retrieve positive evidence; histology terms also retrieve conventional
+# adenocarcinoma reports for the reference group. Bare transformation wording
+# remains excluded because it mostly matches unrelated text.
 NEPC_DX_TRIGGER_REGEX = {
     "nepc_dx": (
         r"\b(?:"
@@ -90,6 +90,12 @@ NEPC_DX_TRIGGER_REGEX = {
         r"transdifferentiat(?:e|ed|ion|ing)|lineage\s+plasticity|"
         r"synaptophysin|chromogranin|cd\s?56|insm-?1|neuron[\s-]+specific\s+enolase|nse"
         r")\b"
+    ),
+    # Histology must reach the extractor even without NE wording: it supports
+    # the conventional reference group and the adenocarcinoma + IHC pairing.
+    "prostate_histology": (
+        r"\b(?:adeno[\s-]?ca(?:rcinoma)?|gleason|grade\s+group|"
+        r"poorly[\s-]+differentiated|de[\s-]?differentiated)\b"
     ),
 }
 
@@ -126,6 +132,64 @@ AVPC_TRIGGER_REGEX = {
     ),
 }
 assert AVPC_TRIGGER_REGEX["nepc"] != TRIGGER_REGEX["nepc"]
+
+
+# Triggers for the per-note AVPC-adjacent pipeline (tasks/avpc_adjacent): the
+# full AVPC set (it re-extracts the strict facts; "aggressive variant",
+# "anaplastic" and "variant CRPC" are already in TRIGGER_REGEX["avpc"]) plus
+# the extended visceral sites and the relaxed bone-extent wording. Both new
+# families are anchored to a lesion or bone word: bare "multiple", "diffuse"
+# or "soft tissue" would match most notes. Rust regex engine: no lookaround.
+AVPC_ADJACENT_TRIGGER_REGEX = {
+    **AVPC_TRIGGER_REGEX,
+    "adjacent_sites": (
+        r"\b(?:dura|dural|leptomening\w*|intramedullary|spinal\s+cord|intracranial|"
+        r"bladder|rectal|rectum|soft[\s-]+tissue|subcutaneous|cutaneous|skin|dermal|"
+        r"muscle|muscular|intramuscular)\s+"
+        r"(?:metasta\w*|mets|lesions?|masses|mass|deposits?|nodules?|implants?|disease|"
+        r"involvement)\b"
+    ),
+    "adjacent_extent": (
+        r"\b(?:extensive|widespread|diffuse|diffusely|numerous|multiple|multifocal|"
+        r"high[\s-]+volume|heavy|large)\s+(?:[a-z-]+\s+){0,3}"
+        r"(?:bone|bony|osseous|skeletal|osteoblastic|osteolytic|sclerotic|lytic)\b|"
+        r"\b(?:bone|bony|osseous|skeletal)\s+(?:[a-z-]+\s+){0,2}burden\b"
+    ),
+}
+
+
+# Triggers for the per-note AR-low / AR-indifferent task (tasks/arlpc). Rust
+# regex engine: no lookaround. Bare "PSA"/"PSMA" are deliberately not triggers
+# (serum PSA and PSMA-PET would swamp the scan); whole pathology reports are
+# kept once any trigger hits, so their panel lines still reach the model.
+ARLPC_TRIGGER_REGEX = {
+    "ar_ihc": (
+        r"\b(?:androgen\s+receptors?|ar\s*(?:(?:is|was|shows?|demonstrates?)\s+)?"
+        r"(?:ihc|immuno\w*|stain\w*|express\w*|neg\w*|pos\w*|null|low|loss|"
+        r"weak\w*|focal\w*|patchy|strong\w*|moderate\w*|absent|reduced|"
+        r"heterogeneous\w*|decreased|diminished|subset|rare|scattered|lost))\b|"
+        r"\bar\s*[-+(:]|\b(?:negative|positive|weak|absent|loss|lack)\s+"
+        r"(?:(?:staining|expression)\s+)?(?:for|of)\s+ar\b"
+    ),
+    "ar_target_ihc": (
+        r"\b(?:nkx3[.\s-]?1|psap|prostatic\s+acid\s+phosphatase|hoxb13|"
+        r"psma\s*(?:ihc|immuno\w*|stain\w*)|psa\s*(?:ihc|immuno\w*|stain\w*))\b"
+    ),
+    "ar_statement": (
+        r"\b(?:double[\s-]?negative|dnpc|arlpc|"
+        r"ar[\s-]?(?:indifferent|independent|null|negative|low|loss|lost|deficient))\b"
+    ),
+    "androgen_independent": (
+        r"\b(?:androgen[\s-]+(?:independen\w*|indifferen\w*)|"
+        r"hormone[\s-]+(?:refractory|resistan\w*))\b"
+    ),
+    "ar_genomic": (
+        r"\b(?:ar|androgen\s+receptor)\s+(?:gene\s+)?"
+        r"(?:homozygous\s+|biallelic\s+|copy[\s-]+(?:number\s+)?)?"
+        r"(?:loss|deletion|deleted)\b|"
+        r"\b(?:loss|deletion)\s+of\s+(?:the\s+)?(?:ar|androgen\s+receptor)\b"
+    ),
+}
 
 
 # Triggers for the shared disease-course extraction (tasks/disease_course),

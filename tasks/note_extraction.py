@@ -55,7 +55,7 @@ from preprocessing.longitudinal import (
 )
 from preprocessing.notes import load_selected_mrns, to_iso_date
 from preprocessing.parquet_io import read_metadata, write_metadata, write_parquet_atomic
-from providers.response import parse_json_response
+from providers.response import DEFAULT_OUTPUT_CORRECTION_RETRIES, call_json_with_correction
 from tasks.trial_guard import TRIAL_GUARD_VERSION, TrialContext
 
 # Quotes are asked for at <= PROMPT_QUOTE_MAX_CHARS; twice that is accepted so a
@@ -65,7 +65,6 @@ PROMPT_QUOTE_MAX_CHARS = 300
 QUOTE_HARD_MAX_CHARS = 2 * PROMPT_QUOTE_MAX_CHARS
 MAX_FINDINGS_PER_NOTE = 40
 APPEND_BATCH_NOTES = 200
-DEFAULT_OUTPUT_CORRECTION_RETRIES = 1
 CONFIDENCE_VALUES = {"high", "medium", "low"}
 OK_STATUSES = {"ok", "ok_with_rejections"}
 # How a patient's review status bounds its labels. v2: a partial review (some
@@ -342,35 +341,21 @@ def _call_note(spec, provider, client, model, max_retries, note, correction_retr
         {"role": "system", "content": spec.system_prompt + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
-    last_error = None
-    for attempt in range(correction_retries + 1):
-        attempt_messages = messages
-        if last_error is not None:
-            attempt_messages = messages + [
-                {"role": "user", "content": correction_message(spec, last_error)}
-            ]
-        text, error = provider.call_with_retry(client, model, attempt_messages, max_retries)
-        if error:
-            last_error = error
-            # Transport retries are exhausted inside the adapter; only a
-            # truncated answer benefits from asking again for a shorter one.
-            if not str(error).startswith("truncated_response"):
-                return None, error
-            continue
-        try:
-            result = parse_json_response(text)
-        except json.JSONDecodeError as exc:
-            last_error = f"json_parse: {exc}"
-            continue
+
+    def validate_response(result):
         if not isinstance(result, dict):
-            last_error = f"non_dict_response: {type(result).__name__}"
-            continue
+            return None, f"non_dict_response: {type(result).__name__}"
         findings = result.get("findings")
         if not isinstance(findings, list):
-            last_error = "missing_findings_list"
-            continue
+            return None, "missing_findings_list"
         return findings, None
-    return None, last_error or "no_result"
+
+    return call_json_with_correction(
+        provider, client, model, messages, max_retries,
+        validate_response=validate_response,
+        correction_message=lambda error: correction_message(spec, error),
+        correction_retries=correction_retries,
+    )
 
 
 def ground_finding(spec, finding, note):

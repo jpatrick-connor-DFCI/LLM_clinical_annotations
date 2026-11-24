@@ -78,6 +78,15 @@ python tasks/nepc/run_nepc_extraction.py --output-dir /path/to/nepc --provider d
 
 Every preprocessing CLI and task runner supports `--help`.
 
+Gleason extraction, metastasis mapping/adjudication, and the per-note subtyping
+runner share one correction retry for truncated, unparseable, or structurally
+invalid output, after the provider's own retries. The correction asks for complete,
+concise JSON; recovered findings still undergo the usual grounding and validation.
+Persistent failures stay incomplete. To recover previous Gleason or metastasis
+failures, rerun extraction with the same evidence/provider/model and without
+`--overwrite`, or enable `RUN_RETRY_FAILURES` in the matching notebook. Successful
+chunks are reused; metastasis adjudication resumes once all chunks are complete.
+
 The Gleason, NEPC, AVPC, AVPC-adjacent, and ARLPC collectors are prostate-specific.
 Their default cohort is `$COMPASS_PATH/mrn_lists/icd_prostate_mrn_flags.csv`;
 `--mrns` or `--mrn-file` can override it. Only the cancer-stage collector defaults

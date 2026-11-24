@@ -66,10 +66,11 @@ from preprocessing.parquet_io import (  # noqa: E402
     write_rows_atomic,
 )
 from providers import get_provider  # noqa: E402
-from providers.response import parse_json_response  # noqa: E402
+from providers.response import call_json_with_correction  # noqa: E402
 from tasks.met_diagnosis.prompts import (  # noqa: E402
     MET_DX_MAP_PROMPT,
     MET_DX_SYNTHESIS_PROMPT,
+    PROMPT_QUOTE_MAX_CHARS,
     PROMPT_SCHEMA_VERSION,
 )
 from tasks.met_veto import VETO_VERSION, screen_quote  # noqa: E402
@@ -575,14 +576,21 @@ def validate_synthesis_result(result, notes, candidate_index):
     }, None
 
 
-def _call_json(provider, client, model, max_retries, messages):
-    response_text, error = provider.call_with_retry(client, model, messages, max_retries)
-    if error:
-        return None, error
-    try:
-        return parse_json_response(response_text), None
-    except (json.JSONDecodeError, TypeError) as exc:
-        return None, f"json_parse:{exc}"
+def _call_json(provider, client, model, max_retries, messages, *,
+               validate_response, correction_hint):
+    def correction_message(error):
+        return f"""
+Your previous answer failed machine validation with: {error}
+
+Re-read the supplied evidence and return one complete JSON object only, keeping
+every required field in the requested format. Never repeat entries or text.
+{correction_hint}
+""".strip()
+
+    return call_json_with_correction(
+        provider, client, model, messages, max_retries,
+        validate_response=validate_response, correction_message=correction_message,
+    )
 
 
 def _extract_chunk(provider, client, model, max_retries, mrn, chunk_index, chunk):
@@ -602,10 +610,17 @@ def _extract_chunk(provider, client, model, max_retries, mrn, chunk_index, chunk
         {"role": "system", "content": MET_DX_MAP_PROMPT + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
-    result, error = _call_json(provider, client, model, max_retries, messages)
-    if error:
-        return None, error
-    return validate_map_result(result, chunk)
+    return _call_json(
+        provider, client, model, max_retries, messages,
+        validate_response=lambda result: validate_map_result(result, chunk),
+        correction_hint=(
+            'Return {"candidates": [ ... ]}, or {"candidates": []} only when '
+            'nothing qualifies. Report each distinct statement once. Keep each '
+            f'quote verbatim and contiguous, at most {PROMPT_QUOTE_MAX_CHARS} characters, preserving '
+            'the site and any negation or hedge. Copy source_note_date from '
+            'the supporting snippet; use null for unstated metastasis dates.'
+        ),
+    )
 
 
 def extract_patient(provider, client, model, max_retries, mrn, indexed_chunks):
@@ -674,11 +689,19 @@ def synthesize_patient(provider, client, model, max_retries, mrn, chunk_outputs,
         {"role": "system", "content": MET_DX_SYNTHESIS_PROMPT + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
-    result, error = _call_json(provider, client, model, max_retries, messages)
-    if error:
-        return None, error
-    return validate_synthesis_result(
-        result, _flatten_notes(chunks), _candidate_index(chunk_outputs)
+    return _call_json(
+        provider, client, model, max_retries, messages,
+        validate_response=lambda result: validate_synthesis_result(
+            result, _flatten_notes(chunks), _candidate_index(chunk_outputs)
+        ),
+        correction_hint=(
+            'Return a single adjudication with a boolean has_metastatic_disease '
+            'and a one-sentence rationale, not a list of candidates. For a '
+            'positive decision, select the earliest qualifying candidate and '
+            'copy supporting_quote and source_note_date exactly from that '
+            'candidate; do not shorten or rewrite its quote. Follow the '
+            'original instructions for dates and negative decisions.'
+        ),
     )
 
 

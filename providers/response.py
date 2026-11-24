@@ -3,6 +3,8 @@
 import json
 import re
 
+DEFAULT_OUTPUT_CORRECTION_RETRIES = 1
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 
@@ -103,3 +105,41 @@ def parse_json_response(response_text):
     # verbatim clinical quote containing its own quotation marks).
     repaired = _escape_stray_quotes(deduped)
     return _first_json_value(repaired)
+
+
+def call_json_with_correction(
+    provider, client, model, messages, max_retries, *,
+    validate_response, correction_message,
+    correction_retries=DEFAULT_OUTPUT_CORRECTION_RETRIES,
+):
+    """Retry unusable output with task-specific instructions, as in subtyping.
+
+    The adapter owns transport retries and token-budget recovery. Only exhausted
+    truncation, JSON parsing, or response-structure errors get a correction call.
+    validate_response returns (result, error); finding-level grounding stays in
+    the task. Never include the incomplete answer in the correction request.
+    """
+    last_error = None
+    for _ in range(correction_retries + 1):
+        attempt_messages = messages
+        if last_error is not None:
+            attempt_messages = messages + [
+                {"role": "user", "content": correction_message(last_error)}
+            ]
+        text, error = provider.call_with_retry(
+            client, model, attempt_messages, max_retries
+        )
+        if error:
+            last_error = error
+            if not str(error).startswith("truncated_response"):
+                return None, error
+            continue
+        try:
+            result = parse_json_response(text)
+        except (json.JSONDecodeError, TypeError) as exc:
+            last_error = f"json_parse: {exc}"
+            continue
+        result, last_error = validate_response(result)
+        if last_error is None:
+            return result, None
+    return None, last_error or "no_result"

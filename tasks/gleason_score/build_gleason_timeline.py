@@ -64,7 +64,7 @@ from preprocessing.parquet_io import (  # noqa: E402
     write_rows_atomic,
 )
 from providers import get_provider  # noqa: E402
-from providers.response import parse_json_response  # noqa: E402
+from providers.response import call_json_with_correction  # noqa: E402
 from tasks.gleason_score.prompts import GLEASON_SYSTEM_PROMPT  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = Path(DEFAULT_DATA_PATH) / "LLM_gleason_timeline"
@@ -405,7 +405,7 @@ def validate_gleason_finding(finding, chunk):
 
 
 def _extract_chunk(provider, client, model, max_retries, mrn, chunk):
-    """Run one LLM call for a single chunk.
+    """Extract one chunk, correcting truncated or malformed output once.
 
     Returns (findings, error). Exactly one of the two is meaningful: on error
     findings is None.
@@ -421,18 +421,35 @@ def _extract_chunk(provider, client, model, max_retries, mrn, chunk):
         {"role": "system", "content": GLEASON_SYSTEM_PROMPT + CLINICAL_SAFETY_CONTEXT},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
-    response_text, error = provider.call_with_retry(client, model, messages, max_retries)
+
+    def validate_response(result):
+        if not isinstance(result, dict):
+            return None, f"non_dict_response: {type(result).__name__}"
+        found = result.get("gleason_findings")
+        if not isinstance(found, list):
+            return None, "missing_gleason_findings"
+        return found, None
+
+    def correction_message(error):
+        return f"""
+Your previous answer failed machine validation with: {error}
+
+Re-read the snippets and return one complete JSON object only, of the form
+{{"gleason_findings": [ ... ]}}. Use {{"gleason_findings": []}} only when no score
+is documented. Keep every required field and report each distinct score once
+per specimen/date; never repeat copy-forward entries. Keep quotes short, exact,
+and contiguous (at most 300 characters), retaining the score. Copy
+source_note_date from the supporting snippet and use null for scoring_date
+when no specimen/scoring date is stated. Do not omit distinct grading events
+to shorten the answer.
+""".strip()
+
+    found, error = call_json_with_correction(
+        provider, client, model, messages, max_retries,
+        validate_response=validate_response, correction_message=correction_message,
+    )
     if error:
         return None, error
-    try:
-        result = parse_json_response(response_text)
-    except json.JSONDecodeError as exc:
-        return None, f"json_parse: {exc}"
-    if not isinstance(result, dict):
-        return None, f"non_dict_response: {type(result).__name__}"
-    found = result.get("gleason_findings")
-    if not isinstance(found, list):
-        return None, "missing_gleason_findings"
     normalized = []
     for finding in found:
         validated, validation_error = validate_gleason_finding(finding, chunk)
